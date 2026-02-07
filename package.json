@@ -1,0 +1,33 @@
+{
+  "name": "mcp-buses-coruna",
+  "version": "1.0.0",
+  "description": "MCP App para mostrar paradas y llegadas de buses en A Coruña.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build:app": "vite build",
+    "build:server": "tsc -p tsconfig.server.json",
+    "build": "npm run build:app && npm run build:server",
+    "dev:app": "vite build --watch",
+    "dev:server": "tsx watch main.ts",
+    "dev": "concurrently \"npm run dev:app\" \"npm run dev:server\"",
+    "serve": "node --enable-source-maps dist/main.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "latest",
+    "@modelcontextprotocol/sdk": "latest",
+    "cors": "latest",
+    "express": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/cors": "latest",
+    "@types/express": "latest",
+    "@types/node": "latest",
+    "concurrently": "latest",
+    "tsx": "latest",
+    "typescript": "latest",
+    "vite": "latest",
+    "vite-plugin-singlefile": "latest"
+  }
+}

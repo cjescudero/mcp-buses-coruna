@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Llegadas de buses</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <main class="layout">
+      <header class="hero">
+        <h1>Llegadas de buses</h1>
+      </header>
+
+      <section class="card search-card">
+        <div class="section-heading">
+          <p class="eyebrow">Busca tu parada</p>
+        </div>
+        <label for="stop-search">Escribe para filtrar</label>
+        <div class="input-wrapper">
+          <input
+            id="stop-search"
+            type="search"
+            inputmode="text"
+            placeholder="Ejemplo: Av. de Oza, Plaza de Lugo..."
+            autocomplete="off"
+          />
+          <button class="home-btn" id="home-button" type="button" aria-label="Usar parada principal">Inicio</button>
+        </div>
+        <ul class="autocomplete" id="stop-results" role="listbox" aria-label="Resultados de paradas"></ul>
+        <p class="current-stop" id="current-stop-label"></p>
+      </section>
+
+      <section class="card next-card">
+        <div class="section-heading">
+          <p class="eyebrow">Buses más próximos</p>
+        </div>
+        <div class="next-arrivals" id="next-arrivals"></div>
+      </section>
+
+      <section class="card arrivals-card">
+        <div class="section-heading">
+          <p class="eyebrow">Resto de buses</p>
+        </div>
+        <h2 id="stop-name">&nbsp;</h2>
+        <p class="muted" id="stop-helper">Parada principal</p>
+        <div class="arrivals" id="arrivals"></div>
+        <p class="status-text" id="status"></p>
+      </section>
+    </main>
+
+    <script type="module" src="/src/mcp-app.ts"></script>
+  </body>
+</html>
