@@ -1,0 +1,19 @@
+[Unit]
+Description=MCP Buses Coruna
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/escudero/mcp-buses-coruna
+Environment=NODE_ENV=production
+Environment=MCP_TRANSPORT=http
+Environment=PORT=3004
+Environment=APP_CONFIG_PATH=/etc/mcp-buses-coruna/app_config.json
+ExecStart=/home/escudero/.nvm/versions/node/v24.13.0/bin/node --enable-source-maps dist/main.js
+Restart=on-failure
+RestartSec=5
+User=escudero
+Group=escudero
+
+[Install]
+WantedBy=multi-user.target
