@@ -144,6 +144,78 @@ sudo systemctl reload nginx
 
 Para producción, añadir TLS (por ejemplo con Let's Encrypt) y usar `https://`.
 
+## Probar la conexión
+
+Si el cliente MCP no conecta, comprueba en este orden:
+
+### 1. Que el servicio esté levantado y escuche en el puerto correcto
+
+El servicio systemd usa `PORT=3004` por defecto en `deploy/mcp-buses-coruna.service`. Nginx debe hacer proxy al **mismo puerto** (en `deploy/nginx-mcp-buses-coruna.conf` está configurado `proxy_pass http://127.0.0.1:3004`).
+
+```bash
+# Estado del servicio
+sudo systemctl status mcp-buses-coruna
+
+# Ver en qué puerto escucha (debe ser 3004 si PORT=3004)
+ss -tlnp | grep 3004
+# o
+curl -s http://127.0.0.1:3004/health
+```
+
+### 2. Script de prueba (recomendado)
+
+Desde el repo:
+
+```bash
+./scripts/test-mcp-connection.sh
+```
+
+Para probar vía Nginx (sustituye por tu dominio):
+
+```bash
+BASE_URL=http://escudero.gtec.udc.es ./scripts/test-mcp-connection.sh
+```
+
+### 3. Health con curl
+
+Sustituye `escudero.gtec.udc.es` por tu `server_name` si es distinto:
+
+```bash
+curl -s http://escudero.gtec.udc.es/health
+# Debe devolver: {"status":"ok","transport":"streamable-http"}
+```
+
+Si falla aquí, revisa: Nginx activo, sitio habilitado, y que el backend responda en 3004.
+
+### 4. URL para el cliente MCP (Cursor, Claude, etc.)
+
+- **Tras Nginx:** `http://escudero.gtec.udc.es/mcp` (o `https://...` si tienes TLS).
+- **Local (sin Nginx):** `http://localhost:3004/mcp`.
+
+En Cursor: *Settings → MCP → Add server* (o editar `~/.cursor/mcp.json`). Ejemplo de entrada para transporte HTTP:
+
+```json
+{
+  "mcpServers": {
+    "buses-coruna": {
+      "url": "http://escudero.gtec.udc.es/mcp"
+    }
+  }
+}
+```
+
+Si el servidor está en otra máquina, usa la URL pública (con `https://` en producción). No uses `localhost` en el cliente si el servidor corre en otro host.
+
+### 5. Logs del servidor
+
+```bash
+journalctl -u mcp-buses-coruna -f
+```
+
+Al conectar el cliente deberías ver peticiones en el log. Si no aparece nada, el cliente no está llegando al backend (firewall, URL errónea o Nginx).
+
+---
+
 ## Configuración del cliente MCP
 
 ### Endpoint MCP (genérico)
@@ -152,9 +224,9 @@ Cuando se expone por Nginx:
 
 `https://mcp.tudominio.com/mcp`
 
-En local para pruebas:
+En local para pruebas (puerto por defecto del README, 3001; en el servicio de deploy se usa 3004):
 
-`http://localhost:3001/mcp`
+`http://localhost:3001/mcp` o `http://localhost:3004/mcp` según tu `PORT`.
 
 Healthcheck opcional:
 
