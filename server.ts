@@ -451,6 +451,59 @@ export function createServer(): McpServer {
 
   const config = createTransitConfig();
   const transit = new TransitService(config);
+  const getArrivalsForStop = async (selectedStopId: number) => {
+    const stop = await transit.getStop(selectedStopId);
+
+    if (!stop) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `No existe la parada ${selectedStopId}.`,
+          },
+        ],
+        structuredContent: {
+          primaryStopId: config.primaryStopId,
+          stop: null,
+          arrivals: null,
+          message: "stop_not_found",
+        },
+      };
+    }
+
+    try {
+      const arrivals = await transit.getArrivals(selectedStopId);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: summarizeArrivals(stop, arrivals),
+          },
+        ],
+        structuredContent: {
+          primaryStopId: config.primaryStopId,
+          stop,
+          arrivals,
+        },
+      };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "transit_api_unavailable";
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `No se pudieron recuperar las llegadas para la parada ${selectedStopId} (${detail}).`,
+          },
+        ],
+        structuredContent: {
+          primaryStopId: config.primaryStopId,
+          stop,
+          arrivals: null,
+          message: detail,
+        },
+      };
+    }
+  };
 
   registerAppTool(
     server,
@@ -458,9 +511,14 @@ export function createServer(): McpServer {
     {
       title: "Llegadas de buses (A Coruña)",
       description:
-        "Muestra la información de una parada: buses más próximos y resto de llegadas para líneas de interés.",
+        "Muestra llegadas de una parada. Si no se indica stopId, usa automáticamente la parada principal configurada.",
       inputSchema: {
-        stopId: z.number().int().positive().optional().describe("ID de parada"),
+        stopId: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("ID de parada (opcional). Si se omite, se usa la parada principal."),
       },
       _meta: {
         ui: {
@@ -468,60 +526,24 @@ export function createServer(): McpServer {
         },
       },
     },
-    async ({ stopId }) => {
-      const selectedStopId = stopId ?? config.primaryStopId;
-      const stop = await transit.getStop(selectedStopId);
+    async ({ stopId }) => getArrivalsForStop(stopId ?? config.primaryStopId),
+  );
 
-      if (!stop) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `No existe la parada ${selectedStopId}.`,
-            },
-          ],
-          structuredContent: {
-            primaryStopId: config.primaryStopId,
-            stop: null,
-            arrivals: null,
-            message: "stop_not_found",
-          },
-        };
-      }
-
-      try {
-        const arrivals = await transit.getArrivals(selectedStopId);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: summarizeArrivals(stop, arrivals),
-            },
-          ],
-          structuredContent: {
-            primaryStopId: config.primaryStopId,
-            stop,
-            arrivals,
-          },
-        };
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : "transit_api_unavailable";
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `No se pudieron recuperar las llegadas para la parada ${selectedStopId} (${detail}).`,
-            },
-          ],
-          structuredContent: {
-            primaryStopId: config.primaryStopId,
-            stop,
-            arrivals: null,
-            message: detail,
-          },
-        };
-      }
+  registerAppTool(
+    server,
+    "show_default_bus_arrivals",
+    {
+      title: "Llegadas de buses (parada por defecto)",
+      description:
+        "Muestra llegadas usando siempre la parada principal configurada. Útil para consultas genéricas sin indicar parada.",
+      inputSchema: {},
+      _meta: {
+        ui: {
+          resourceUri: APP_RESOURCE_URI,
+        },
+      },
     },
+    async () => getArrivalsForStop(config.primaryStopId),
   );
 
   registerAppTool(
