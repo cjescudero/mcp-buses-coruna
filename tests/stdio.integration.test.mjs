@@ -65,6 +65,7 @@ const stopsPayload = {
 };
 
 const arrivalsPayload = {
+  resultado: "OK",
   buses: {
     lineas: [
       {
@@ -147,6 +148,7 @@ async function startMockTransitApi() {
   let catalogRequests = 0;
   let arrivalRequests = 0;
   let catalogResponse = stopsPayload;
+  const arrivalOverrides = new Map();
   const server = createHttpServer((request, response) => {
     response.setHeader("content-type", "application/json; charset=utf-8");
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -157,7 +159,14 @@ async function startMockTransitApi() {
     }
     if (url.searchParams.get("func") === "0") {
       arrivalRequests += 1;
-      if (url.searchParams.get("dato") === "500") {
+      const stopId = Number(url.searchParams.get("dato"));
+      const override = arrivalOverrides.get(stopId);
+      if (override) {
+        response.statusCode = override.status;
+        response.end(JSON.stringify(override.payload));
+        return;
+      }
+      if (stopId === 500) {
         response.statusCode = 503;
         response.end(JSON.stringify({ error: "service_unavailable" }));
         return;
@@ -179,6 +188,9 @@ async function startMockTransitApi() {
     getArrivalRequests: () => arrivalRequests,
     setCatalogResponse: (value) => {
       catalogResponse = value;
+    },
+    setArrivalResponse: (stopId, payload, status = 200) => {
+      arrivalOverrides.set(stopId, { payload, status });
     },
   };
 }
@@ -223,6 +235,11 @@ test("contrato MCP por stdio", async (t) => {
       CATALOG_SOURCE_URL: `${mockApi.baseUrl}/query?func=7`,
       ARRIVALS_URL_TEMPLATE: `${mockApi.baseUrl}/query?func=0&dato={stop_id}`,
       HTTP_TIMEOUT_SECONDS: "2",
+      ARRIVALS_CACHE_TTL_SECONDS: "15",
+      ARRIVALS_STALE_TTL_SECONDS: "120",
+      ITRANVIAS_MIN_INTERVAL_MS: "0",
+      ITRANVIAS_MAX_REQUESTS_PER_MINUTE: "100",
+      WIDGET_DOMAIN: "https://buses.example.test",
     },
     stderr: "pipe",
   });
@@ -241,10 +258,24 @@ test("contrato MCP por stdio", async (t) => {
       tools.map((tool) => tool.name).sort(),
       ["list_bus_lines", "search_stops", "show_bus_arrivals"],
     );
+    assert(tools.every((tool) => tool.outputSchema?.type === "object"));
+    const searchTool = tools.find((tool) => tool.name === "search_stops");
+    const arrivalsTool = tools.find((tool) => tool.name === "show_bus_arrivals");
+    assert.equal(searchTool?._meta?.ui?.resourceUri, undefined);
+    assert.notDeepEqual(searchTool?._meta?.ui?.visibility, ["app"]);
+    assert.equal(
+      arrivalsTool?._meta?.ui?.resourceUri,
+      "ui://buses-coruna/mcp-app-v2.html",
+    );
     const { resources } = await client.listResources();
-    assert(resources.some((resource) => resource.uri === "ui://buses-coruna/mcp-app.html"));
-    const resource = await client.readResource({ uri: "ui://buses-coruna/mcp-app.html" });
+    assert(resources.some((resource) => resource.uri === "ui://buses-coruna/mcp-app-v2.html"));
+    const resource = await client.readResource({ uri: "ui://buses-coruna/mcp-app-v2.html" });
     assert.match(resource.contents[0]?.text ?? "", /<!doctype html>/i);
+    assert.deepEqual(resource.contents[0]?._meta?.ui, {
+      prefersBorder: true,
+      domain: "https://buses.example.test",
+      csp: { connectDomains: [], resourceDomains: [] },
+    });
   });
 
   await t.test("devuelve todas las líneas en el orden del snapshot", async () => {
@@ -314,11 +345,35 @@ test("contrato MCP por stdio", async (t) => {
     const result = await client.callTool({ name: "show_bus_arrivals", arguments: { stopId: 42 } });
     assert.equal(result.isError, undefined);
     assert.deepEqual(result.structuredContent.catalog, expectedCatalogMetadata);
+    assert.equal(result.structuredContent.arrivals.source, "live");
+    assert.match(result.structuredContent.arrivals.fetched_at, /^\d{4}-\d{2}-\d{2}T/);
     const lines = result.structuredContent.arrivals.lines;
     assert.deepEqual(lines.map((line) => line.line_id), [3, 12, 99]);
     assert.deepEqual(lines[0].buses.map((bus) => bus.eta_minutes), [2, 8]);
     assert.deepEqual(lines[1].buses.map((bus) => bus.eta_minutes), [5]);
     assert.deepEqual(lines[2].buses.map((bus) => bus.eta_minutes), [1]);
+  });
+
+  await t.test("reutiliza una lectura reciente sin volver a cargar iTranvias", async () => {
+    const before = mockApi.getArrivalRequests();
+    const result = await client.callTool({
+      name: "show_bus_arrivals",
+      arguments: { stopId: 42 },
+    });
+    assert.equal(result.isError, undefined);
+    assert.equal(result.structuredContent.arrivals.source, "cache");
+    assert.equal(mockApi.getArrivalRequests(), before);
+  });
+
+  await t.test("deduplica consultas simultáneas de la misma parada", async () => {
+    const before = mockApi.getArrivalRequests();
+    const [first, second] = await Promise.all([
+      client.callTool({ name: "show_bus_arrivals", arguments: { stopId: 7 } }),
+      client.callTool({ name: "show_bus_arrivals", arguments: { stopId: 7 } }),
+    ]);
+    assert.equal(first.isError, undefined);
+    assert.equal(second.isError, undefined);
+    assert.equal(mockApi.getArrivalRequests(), before + 1);
   });
 
   await t.test("marca una parada inexistente como error de herramienta", async () => {
@@ -342,6 +397,67 @@ test("contrato MCP por stdio", async (t) => {
     assert.equal(mockApi.getCatalogRequests(), 0);
     assert.ok(mockApi.getArrivalRequests() >= 2);
   });
+
+  await t.test("clasifica el marcador Web_Beta como limitación temporal", async () => {
+    mockApi.setArrivalResponse(500, { Origen: "Web_Beta" });
+    const result = await client.callTool({
+      name: "show_bus_arrivals",
+      arguments: { stopId: 500 },
+    });
+    assert.equal(result.isError, true);
+    assert.equal(result.structuredContent.message, "transit_api_rate_limited");
+  });
+});
+
+test("conserva temporalmente la última lectura válida", async (t) => {
+  const mockApi = await startMockTransitApi();
+  const tempDir = await mkdtemp(path.join(tmpdir(), "mcp-buses-coruna-stale-"));
+  const catalogPath = path.join(tempDir, "transit-catalog.json");
+  await writeFile(catalogPath, `${JSON.stringify(normalizedCatalog, null, 2)}\n`, "utf8");
+
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(projectDir, "dist", "main.js")],
+    cwd: projectDir,
+    env: {
+      ...process.env,
+      MCP_TRANSPORT: "stdio",
+      CATALOG_PATH: catalogPath,
+      ARRIVALS_URL_TEMPLATE: `${mockApi.baseUrl}/query?func=0&dato={stop_id}`,
+      ARRIVALS_CACHE_TTL_SECONDS: "0",
+      ARRIVALS_STALE_TTL_SECONDS: "120",
+      ITRANVIAS_MIN_INTERVAL_MS: "0",
+      ITRANVIAS_MAX_REQUESTS_PER_MINUTE: "100",
+    },
+    stderr: "pipe",
+  });
+  const client = new Client({ name: "mcp-buses-coruna-stale-tests", version: "1.0.0" });
+
+  t.after(async () => {
+    await client.close().catch(() => {});
+    await mockApi.close();
+    await rm(tempDir, { recursive: true, force: true });
+  });
+  await client.connect(transport);
+
+  const live = await client.callTool({
+    name: "show_bus_arrivals",
+    arguments: { stopId: 42 },
+  });
+  assert.equal(live.structuredContent.arrivals.source, "live");
+  const observedAt = live.structuredContent.arrivals.fetched_at;
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  mockApi.setArrivalResponse(42, { Origen: "Web_Beta" });
+  const stale = await client.callTool({
+    name: "show_bus_arrivals",
+    arguments: { stopId: 42 },
+  });
+  assert.equal(stale.isError, undefined);
+  assert.equal(stale.structuredContent.arrivals.source, "stale");
+  assert.equal(stale.structuredContent.arrivals.fetched_at, observedAt);
+  assert.deepEqual(stale.structuredContent.arrivals.lines, live.structuredContent.arrivals.lines);
+  assert.equal(mockApi.getArrivalRequests(), 2);
 });
 
 test("actualiza el catálogo manualmente y de forma atómica", async (t) => {

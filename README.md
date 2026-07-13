@@ -70,11 +70,31 @@ Variables exclusivas del actualizador:
 
 En runtime, la única operación remota es `func=0`. Puede dirigirse a un proxy o a otra instancia compatible mediante `ARRIVALS_URL_TEMPLATE`; el marcador `{stop_id}` es obligatorio.
 
+iTranvias limita actualmente las consultas a una por segundo y cuatro por minuto. El servidor aplica esos límites por proceso, deduplica peticiones simultáneas de la misma parada y conserva una lectura fresca durante 15 segundos. Si el proveedor se bloquea temporalmente, puede entregar durante un máximo de 120 segundos la última lectura válida, marcada como `source: "stale"` y con su `fetched_at` original. Nunca recalcula ni inventa minutos.
+
 | Variable | Predeterminado | Restricción |
 | --- | --- | --- |
 | `CATALOG_PATH` | `data/transit-catalog.json` | Snapshot local normalizado y legible |
 | `ARRIVALS_URL_TEMPLATE` | `https://itranvias.com/queryitr_v3.php?func=0&dato={stop_id}` | URL HTTP(S) con `{stop_id}` |
 | `HTTP_TIMEOUT_SECONDS` | `8` | Número entre 1 y 120 |
+| `ARRIVALS_CACHE_TTL_SECONDS` | `15` | Tiempo durante el que se reutiliza una lectura válida, entre 0 y 300 |
+| `ARRIVALS_STALE_TTL_SECONDS` | `120` | Antigüedad máxima de la última lectura utilizable, hasta 3600 segundos |
+| `ITRANVIAS_MIN_INTERVAL_MS` | `1100` | Separación mínima entre peticiones externas |
+| `ITRANVIAS_MAX_REQUESTS_PER_MINUTE` | `4` | Máximo global por proceso Node |
+
+El widget no se actualiza automáticamente: consulta al seleccionar una parada y cuando la persona pulsa **Actualizar**. Esto evita que varias conversaciones agoten por sí solas el límite del proveedor. Si despliegas varios procesos o réplicas bajo una misma IP, coordina el límite en un proxy o almacenamiento compartido.
+
+## Integración como aplicación de ChatGPT
+
+La plantilla usa una URI versionada para evitar que ChatGPT conserve un bundle anterior. `search_stops` es una herramienta pública y no abre el widget; solo `show_bus_arrivals` está vinculada a la plantilla interactiva.
+
+El recurso declara un CSP sin conexiones directas (`connectDomains` y `resourceDomains` vacíos), porque el bundle es autocontenido y accede al servidor exclusivamente mediante el puente MCP. El dominio del widget se configura como un origen, sin ruta:
+
+| Variable | Predeterminado | Descripción |
+| --- | --- | --- |
+| `WIDGET_DOMAIN` | `https://escudero.gtec.udc.es` | Origen dedicado que ChatGPT asigna al widget |
+
+Para publicar más de una aplicación, usa un subdominio diferente y con DNS/TLS para cada una, por ejemplo `https://buses-coruna.escudero.gtec.udc.es`. Tras cambiar HTML, CSS o JavaScript, incrementa la versión de `APP_RESOURCE_URI` en `server.ts` antes de volver a crear la versión de la aplicación en ChatGPT.
 
 ## Transporte HTTP
 
@@ -134,6 +154,7 @@ HOST=127.0.0.1
 PORT=3001
 CATALOG_PATH=/opt/mcp-buses-coruna/data/transit-catalog.json
 HTTP_TIMEOUT_SECONDS=8
+WIDGET_DOMAIN=https://escudero.gtec.udc.es
 MCP_ALLOWED_ORIGINS=https://cliente.example.org
 MCP_ALLOWED_HOSTS=mcp.example.org
 MCP_AUTH_TOKEN=cambia-este-token

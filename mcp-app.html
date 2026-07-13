@@ -7,16 +7,17 @@
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
-    <main class="layout">
-      <header class="hero">
-        <h1>Llegadas de buses</h1>
+    <main class="transit-app">
+      <header class="app-header">
+        <div class="transit-mark" aria-hidden="true"><span></span><span></span></div>
+        <div>
+          <p class="app-kicker">Movilidad urbana · A Coruña</p>
+          <h1>Próximos buses</h1>
+        </div>
       </header>
 
-      <section class="card search-card" aria-labelledby="search-heading">
-        <div class="section-heading">
-          <h2 class="eyebrow" id="search-heading">Busca tu parada</h2>
-        </div>
-        <label for="stop-search">Escribe para filtrar</label>
+      <section class="search-panel" aria-labelledby="search-heading">
+        <label id="search-heading" for="stop-search">Buscar parada</label>
         <div class="input-wrapper">
           <input
             id="stop-search"
@@ -30,32 +31,33 @@
             aria-expanded="false"
             aria-describedby="results-status"
           />
+          <span class="search-icon" aria-hidden="true"></span>
         </div>
         <ul class="autocomplete" id="stop-results" role="listbox" aria-label="Resultados de paradas" hidden></ul>
         <p class="sr-only" id="results-status" role="status" aria-live="polite" aria-atomic="true"></p>
-        <p class="current-stop" id="current-stop-label" aria-live="polite" aria-atomic="true" hidden></p>
       </section>
 
-      <section class="card next-card" aria-labelledby="next-heading">
-        <div class="section-heading">
-          <h2 class="eyebrow" id="next-heading">Buses más próximos</h2>
+      <section class="arrival-workspace" aria-labelledby="stop-name">
+        <header class="stop-header">
+          <div>
+            <p class="stop-code" id="current-stop-label" aria-live="polite" aria-atomic="true" hidden></p>
+            <h2 id="stop-name">Selecciona una parada</h2>
+            <p class="stop-helper" id="stop-helper">Cargando el catálogo local…</p>
+          </div>
+          <button class="refresh-button" id="refresh-button" type="button" disabled>
+            <span aria-hidden="true">↻</span> Actualizar
+          </button>
+        </header>
+        <div class="freshness-row">
+          <span class="freshness-dot" aria-hidden="true"></span>
+          <p id="status" role="status" aria-live="polite" aria-atomic="true">Conectando con el servidor MCP…</p>
         </div>
-        <div class="next-arrivals" id="next-arrivals" aria-busy="false">
-          <div class="empty-state">Selecciona una parada para consultar las próximas llegadas.</div>
-        </div>
-      </section>
-
-      <section class="card arrivals-card" aria-labelledby="stop-name">
-        <div class="section-heading">
-          <p class="eyebrow">Resto de buses</p>
-        </div>
-        <h2 id="stop-name">Ninguna parada seleccionada</h2>
-        <p class="muted" id="stop-helper">Carga el catálogo para empezar</p>
         <div class="arrivals" id="arrivals" aria-busy="false">
-          <div class="empty-state">Busca por nombre o número de parada para ver todos los buses.</div>
+          <div class="empty-state">Busca una parada para consultar sus tiempos.</div>
         </div>
-        <p class="status-text" id="status" role="status" aria-live="polite" aria-atomic="true"></p>
       </section>
+
+      <footer>Catálogo local · llegadas proporcionadas por iTranvias</footer>
     </main>
 
     <script type="module" src="/src/mcp-app.ts"></script>

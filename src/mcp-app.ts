@@ -32,6 +32,8 @@ interface LineArrivals {
 interface ArrivalsResponse {
   stop_id: number;
   lines: LineArrivals[];
+  fetched_at: string;
+  source: "live" | "cache" | "stale";
 }
 
 interface SearchToolPayload {
@@ -50,7 +52,6 @@ interface ToolResultLike {
   isError?: boolean;
 }
 
-const REFRESH_INTERVAL_MS = 45_000;
 const DEFAULT_LOCALE = "es-ES";
 const app = new App({
   name: "Buses A Coruna MCP App",
@@ -66,15 +67,13 @@ const stopNameEl = document.getElementById("stop-name");
 const stopHelperEl = document.getElementById("stop-helper");
 const arrivalsEl = document.getElementById("arrivals");
 const statusEl = document.getElementById("status");
-const nextArrivalsEl = document.getElementById("next-arrivals");
+const refreshButton = document.getElementById("refresh-button") as HTMLButtonElement | null;
 
 let currentStopId: number | null = null;
 let allStops: StopSummary[] = [];
 let filteredStops: StopSummary[] = [];
-let refreshTimer: number | undefined;
 let requestGeneration = 0;
 let activeArrivalsController: AbortController | undefined;
-let nextShownMap = new Map<number, number>();
 let hasRenderedArrivals = false;
 let hasUserSelectedStop = false;
 let isConnected = false;
@@ -94,6 +93,11 @@ searchInput?.addEventListener("blur", () => {
 });
 resultsList?.addEventListener("pointerdown", (event) => event.preventDefault());
 resultsList?.addEventListener("click", handleResultClick);
+refreshButton?.addEventListener("click", () => {
+  if (currentStopId !== null) {
+    void loadArrivals(currentStopId, { manual: true });
+  }
+});
 document.addEventListener("visibilitychange", handleVisibilityChange);
 
 app.ontoolresult = (result) => {
@@ -110,7 +114,6 @@ app.onteardown = async () => {
   requestGeneration += 1;
   activeArrivalsController?.abort();
   activeArrivalsController = undefined;
-  clearRefreshTimer();
   busyOwners.clear();
   renderBusyState();
   return {};
@@ -202,15 +205,17 @@ function applyArrivalsPayload(payload: ArrivalsToolPayload): void {
   currentStopId = payload.stop.id;
   updateCurrentStopLabel(payload.stop);
   updateStopSummary(payload.stop);
+  if (refreshButton) {
+    refreshButton.disabled = false;
+  }
 
   if (!payload.arrivals) {
     renderArrivalError(payload.message ?? "transit_api_unavailable");
     return;
   }
 
-  renderNextArrivals(payload.arrivals);
   renderArrivals(payload.arrivals);
-  setStatus(`Actualizado a las ${formatClockTime(new Date())}`);
+  setFreshnessStatus(payload.arrivals);
 }
 
 function handleSearchInput(event: Event): void {
@@ -354,7 +359,6 @@ async function loadArrivals(
   activeArrivalsController?.abort();
   const controller = new AbortController();
   activeArrivalsController = controller;
-  clearRefreshTimer();
   setBusyOwner(busyOwner, true);
   setStatus(options.manual ? "Actualizando bajo pedido..." : "Buscando datos frescos...");
 
@@ -385,9 +389,6 @@ async function loadArrivals(
       activeArrivalsController = undefined;
     }
     setBusyOwner(busyOwner, false);
-    if (generation === requestGeneration && !isTornDown) {
-      scheduleRefresh();
-    }
   }
 }
 
@@ -395,75 +396,14 @@ function isCurrentRequest(generation: number, stopId: number): boolean {
   return generation === requestGeneration && stopId === currentStopId && !isTornDown;
 }
 
-function scheduleRefresh(delay = REFRESH_INTERVAL_MS): void {
-  clearRefreshTimer();
-  if (!isConnected || isTornDown || document.hidden || !hasUserSelectedStop || currentStopId === null) {
-    return;
-  }
-  const stopId = currentStopId;
-  refreshTimer = window.setTimeout(() => {
-    refreshTimer = undefined;
-    void loadArrivals(stopId);
-  }, delay);
-}
-
 function handleVisibilityChange(): void {
   if (document.hidden) {
     requestGeneration += 1;
     activeArrivalsController?.abort();
     activeArrivalsController = undefined;
-    clearRefreshTimer();
     busyOwners.clear();
     renderBusyState();
-    return;
   }
-  if (isConnected && !isTornDown && hasUserSelectedStop && currentStopId !== null) {
-    void loadArrivals(currentStopId);
-  }
-}
-
-function renderNextArrivals(arrivals: ArrivalsResponse): void {
-  if (!nextArrivalsEl) {
-    return;
-  }
-  nextArrivalsEl.replaceChildren();
-  nextShownMap = new Map<number, number>();
-
-  const upcoming: { line: LineArrivals; bus: ArrivalBus }[] = [];
-  for (const line of arrivals.lines) {
-    const nextBus = line.buses.find((bus) => bus.eta_minutes !== null);
-    if (nextBus) {
-      upcoming.push({ line, bus: nextBus });
-    }
-  }
-
-  if (!upcoming.length) {
-    nextArrivalsEl.appendChild(createEmptyState("Sin llegadas próximas."));
-    return;
-  }
-
-  upcoming
-    .sort((a, b) => toSortableEta(a.bus.eta_minutes) - toSortableEta(b.bus.eta_minutes))
-    .slice(0, 4)
-    .forEach(({ line, bus }) => {
-      const card = document.createElement("div");
-      card.className = "next-card-item";
-      applyLineColor(card, line.color_hex);
-
-      const lineEl = document.createElement("div");
-      lineEl.className = "next-line";
-      lineEl.textContent = line.line_name ?? `Línea ${line.line_id}`;
-      const relativeEl = document.createElement("div");
-      relativeEl.className = "next-time";
-      relativeEl.textContent = formatEtaLabel(bus.eta_minutes);
-      const absoluteEl = document.createElement("div");
-      absoluteEl.className = "next-absolute";
-      absoluteEl.textContent = formatAbsoluteTime(bus.eta_minutes);
-
-      card.append(lineEl, relativeEl, absoluteEl);
-      nextArrivalsEl.appendChild(card);
-      nextShownMap.set(line.line_id, bus.bus_id);
-    });
 }
 
 function renderArrivals(arrivals: ArrivalsResponse): void {
@@ -476,25 +416,27 @@ function renderArrivals(arrivals: ArrivalsResponse): void {
     return;
   }
 
-  arrivals.lines.forEach((line) => {
-    const card = document.createElement("div");
-    card.className = "line-card";
-    applyLineColor(card, line.color_hex);
+  arrivals.lines.forEach((line, lineIndex) => {
+    const row = document.createElement("div");
+    row.className = "line-row";
+    row.style.animationDelay = `${Math.min(lineIndex * 35, 210)}ms`;
+    applyLineColor(row, line.color_hex);
 
+    const identity = document.createElement("div");
+    identity.className = "line-identity";
+    const color = document.createElement("span");
+    color.className = "line-color";
+    color.setAttribute("aria-hidden", "true");
     const title = document.createElement("div");
     title.className = "line-title";
     title.textContent = line.line_name ?? `Línea ${line.line_id}`;
-    card.appendChild(title);
+    identity.append(color, title);
 
     const busContainer = document.createElement("div");
     busContainer.className = "bus-times";
-    let hasDisplayed = false;
-    line.buses.forEach((bus) => {
-      if (nextShownMap.get(line.line_id) === bus.bus_id) {
-        return;
-      }
+    line.buses.forEach((bus, busIndex) => {
       const badge = document.createElement("div");
-      badge.className = "badge";
+      badge.className = `time-chip${busIndex === 0 ? " is-next" : ""}`;
       badge.appendChild(document.createTextNode(formatEtaLabel(bus.eta_minutes)));
       const absolute = formatAbsoluteTime(bus.eta_minutes);
       if (absolute) {
@@ -503,17 +445,16 @@ function renderArrivals(arrivals: ArrivalsResponse): void {
         badge.appendChild(absoluteEl);
       }
       busContainer.appendChild(badge);
-      hasDisplayed = true;
     });
 
-    if (!line.buses.length || !hasDisplayed) {
+    if (!line.buses.length) {
       const empty = document.createElement("div");
-      empty.className = "badge";
+      empty.className = "time-chip";
       empty.textContent = "Sin buses en ruta";
       busContainer.appendChild(empty);
     }
-    card.appendChild(busContainer);
-    arrivalsEl.appendChild(card);
+    row.append(identity, busContainer);
+    arrivalsEl.appendChild(row);
   });
 }
 
@@ -533,14 +474,14 @@ function updateStopSummary(stop: StopSummary): void {
 function showSelectionState(): void {
   currentStopId = null;
   currentStopLabel?.setAttribute("hidden", "");
-  nextArrivalsEl?.replaceChildren(
-    createEmptyState("Selecciona una parada para consultar las próximas llegadas."),
-  );
   arrivalsEl?.replaceChildren(
-    createEmptyState("Busca por nombre o número de parada para ver todos los buses."),
+    createEmptyState("Busca una parada para consultar sus tiempos."),
   );
+  if (refreshButton) {
+    refreshButton.disabled = true;
+  }
   if (stopNameEl) {
-    stopNameEl.textContent = "Ninguna parada seleccionada";
+    stopNameEl.textContent = "Selecciona una parada";
   }
   if (stopHelperEl) {
     stopHelperEl.textContent = `${allStops.length} ${allStops.length === 1 ? "parada disponible" : "paradas disponibles"}`;
@@ -549,7 +490,6 @@ function showSelectionState(): void {
 }
 
 function showUnavailableState(reason: string): void {
-  nextArrivalsEl?.replaceChildren(createEmptyState("No se encontró la parada solicitada."));
   arrivalsEl?.replaceChildren(createEmptyState("Selecciona otra parada para continuar."));
   if (stopNameEl) {
     stopNameEl.textContent = `Parada no disponible (${reason})`;
@@ -561,8 +501,8 @@ function showUnavailableState(reason: string): void {
 }
 
 function renderArrivalError(reason: string): void {
-  nextArrivalsEl?.replaceChildren(createEmptyState("No se pudo conectar con el servicio."));
   arrivalsEl?.replaceChildren(createEmptyState("No hay datos disponibles en este momento."));
+  mainEl?.setAttribute("data-freshness", "error");
   setStatus(`No se pudo actualizar (${reason}).`);
 }
 
@@ -570,12 +510,8 @@ function updateCurrentStopLabel(stop: StopSummary): void {
   if (!currentStopLabel) {
     return;
   }
-  const prefix = document.createElement("span");
-  prefix.textContent = "Parada seleccionada:";
-  const value = document.createElement("strong");
-  value.textContent = `${stop.id} - ${stop.name}`;
   currentStopLabel.removeAttribute("hidden");
-  currentStopLabel.replaceChildren(prefix, document.createTextNode(" "), value);
+  currentStopLabel.textContent = `Parada ${stop.id}`;
 }
 
 function createEmptyState(text: string): HTMLDivElement {
@@ -613,13 +549,6 @@ function announceResults(text: string): void {
   }
 }
 
-function clearRefreshTimer(): void {
-  if (refreshTimer !== undefined) {
-    window.clearTimeout(refreshTimer);
-    refreshTimer = undefined;
-  }
-}
-
 function setBusyOwner(owner: string, busy: boolean): void {
   if (busy) {
     busyOwners.add(owner);
@@ -632,14 +561,45 @@ function setBusyOwner(owner: string, busy: boolean): void {
 function renderBusyState(): void {
   const busy = busyOwners.size > 0 && !isTornDown;
   mainEl?.setAttribute("aria-busy", String(busy));
-  nextArrivalsEl?.setAttribute("aria-busy", String(busy));
   arrivalsEl?.setAttribute("aria-busy", String(busy));
+  if (refreshButton) {
+    refreshButton.disabled = busy || currentStopId === null;
+  }
 }
 
 function setStatus(text: string): void {
   if (statusEl) {
     statusEl.textContent = text;
   }
+}
+
+function setFreshnessStatus(arrivals: ArrivalsResponse): void {
+  const observedAt = new Date(arrivals.fetched_at);
+  const ageSeconds = Math.max(0, Math.round((Date.now() - observedAt.getTime()) / 1000));
+  mainEl?.setAttribute("data-freshness", arrivals.source);
+
+  if (arrivals.source === "stale") {
+    setStatus(
+      `Última lectura disponible: ${formatClockTime(observedAt)} · hace ${formatAge(ageSeconds)}`,
+    );
+    return;
+  }
+  if (arrivals.source === "cache") {
+    setStatus(`Lectura reciente: ${formatClockTime(observedAt)} · hace ${formatAge(ageSeconds)}`);
+    return;
+  }
+  setStatus(`Datos en tiempo real · ${formatClockTime(observedAt)}`);
+}
+
+function formatAge(seconds: number): string {
+  if (seconds < 5) {
+    return "unos segundos";
+  }
+  if (seconds < 60) {
+    return `${seconds} s`;
+  }
+  const minutes = Math.round(seconds / 60);
+  return `${minutes} min`;
 }
 
 function applyHostContext(context: McpUiHostContext | undefined): void {
@@ -699,10 +659,6 @@ function formatClockTime(date: Date): string {
   }).format(date);
 }
 
-function toSortableEta(value: number | null): number {
-  return value ?? Number.MAX_SAFE_INTEGER;
-}
-
 function parseSearchPayload(raw: unknown): SearchToolPayload | null {
   if (!isRecord(raw) || !isNonNegativeInteger(raw.total) || !Array.isArray(raw.stops)) {
     return null;
@@ -752,7 +708,13 @@ function parseArrivalsPayload(raw: unknown): ArrivalsToolPayload | null {
 }
 
 function isArrivalsResponse(value: unknown): value is ArrivalsResponse {
-  if (!isRecord(value) || !isPositiveInteger(value.stop_id) || !Array.isArray(value.lines)) {
+  if (
+    !isRecord(value) ||
+    !isPositiveInteger(value.stop_id) ||
+    !Array.isArray(value.lines) ||
+    !isIsoDateString(value.fetched_at) ||
+    (value.source !== "live" && value.source !== "cache" && value.source !== "stale")
+  ) {
     return false;
   }
   return value.lines.length <= 100 && value.lines.every(isLineArrivals);
@@ -813,6 +775,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function isIsoDateString(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
 }
 
 function isPositiveInteger(value: unknown): value is number {
