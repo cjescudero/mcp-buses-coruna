@@ -37,11 +37,9 @@ interface ArrivalsResponse {
 interface SearchToolPayload {
   total: number;
   stops: StopSummary[];
-  primaryStopId?: number;
 }
 
 interface ArrivalsToolPayload {
-  primaryStopId: number;
   stop: StopSummary | null;
   arrivals: ArrivalsResponse | null;
   message?: string;
@@ -64,15 +62,13 @@ const searchInput = document.getElementById("stop-search") as HTMLInputElement |
 const resultsList = document.getElementById("stop-results") as HTMLUListElement | null;
 const resultsStatusEl = document.getElementById("results-status");
 const currentStopLabel = document.getElementById("current-stop-label");
-const homeButton = document.getElementById("home-button") as HTMLButtonElement | null;
 const stopNameEl = document.getElementById("stop-name");
 const stopHelperEl = document.getElementById("stop-helper");
 const arrivalsEl = document.getElementById("arrivals");
 const statusEl = document.getElementById("status");
 const nextArrivalsEl = document.getElementById("next-arrivals");
 
-let primaryStopId = 42;
-let currentStopId = 42;
+let currentStopId: number | null = null;
 let allStops: StopSummary[] = [];
 let filteredStops: StopSummary[] = [];
 let refreshTimer: number | undefined;
@@ -98,10 +94,6 @@ searchInput?.addEventListener("blur", () => {
 });
 resultsList?.addEventListener("pointerdown", (event) => event.preventDefault());
 resultsList?.addEventListener("click", handleResultClick);
-homeButton?.addEventListener("click", () => {
-  const stop = findStopById(primaryStopId) ?? createFallbackStop(primaryStopId);
-  void selectStop(stop);
-});
 document.addEventListener("visibilitychange", handleVisibilityChange);
 
 app.ontoolresult = (result) => {
@@ -138,9 +130,6 @@ async function initialize(): Promise<void> {
     applyHostContext(app.getHostContext());
     setStatus("Cargando paradas...");
     await bootstrapStops();
-    if (!hasRenderedArrivals && !isTornDown) {
-      await loadArrivals(currentStopId);
-    }
   } catch {
     if (!isTornDown) {
       setStatus("No se pudo conectar con el servidor MCP.");
@@ -181,7 +170,7 @@ async function bootstrapStops(): Promise<void> {
   try {
     const result = (await app.callServerTool({
       name: "search_stops",
-      arguments: { limit: 400 },
+      arguments: {},
     })) as ToolResultLike;
     const payload = parseSearchPayload(result.structuredContent);
     if (!payload) {
@@ -194,22 +183,17 @@ async function bootstrapStops(): Promise<void> {
 }
 
 function applySearchPayload(payload: SearchToolPayload): void {
-  if (payload.primaryStopId !== undefined) {
-    primaryStopId = payload.primaryStopId;
-    if (!hasRenderedArrivals && !hasUserSelectedStop) {
-      currentStopId = primaryStopId;
-    }
-  }
   allStops = [...payload.stops].sort((a, b) =>
     a.name.localeCompare(b.name, appLocale, { sensitivity: "base" }),
   );
   filteredStops = allStops;
-  updateCurrentStopLabel(findStopById(currentStopId) ?? createFallbackStop(currentStopId));
+  if (!hasRenderedArrivals && !hasUserSelectedStop) {
+    showSelectionState();
+  }
 }
 
 function applyArrivalsPayload(payload: ArrivalsToolPayload): void {
   hasRenderedArrivals = true;
-  primaryStopId = payload.primaryStopId;
   if (!payload.stop) {
     showUnavailableState(payload.message ?? "stop_not_found");
     return;
@@ -413,12 +397,13 @@ function isCurrentRequest(generation: number, stopId: number): boolean {
 
 function scheduleRefresh(delay = REFRESH_INTERVAL_MS): void {
   clearRefreshTimer();
-  if (!isConnected || isTornDown || document.hidden) {
+  if (!isConnected || isTornDown || document.hidden || !hasUserSelectedStop || currentStopId === null) {
     return;
   }
+  const stopId = currentStopId;
   refreshTimer = window.setTimeout(() => {
     refreshTimer = undefined;
-    void loadArrivals(currentStopId);
+    void loadArrivals(stopId);
   }, delay);
 }
 
@@ -432,7 +417,7 @@ function handleVisibilityChange(): void {
     renderBusyState();
     return;
   }
-  if (isConnected && !isTornDown) {
+  if (isConnected && !isTornDown && hasUserSelectedStop && currentStopId !== null) {
     void loadArrivals(currentStopId);
   }
 }
@@ -487,7 +472,7 @@ function renderArrivals(arrivals: ArrivalsResponse): void {
   }
   arrivalsEl.replaceChildren();
   if (!arrivals.lines.length) {
-    arrivalsEl.appendChild(createEmptyState("Sin datos para las líneas configuradas."));
+    arrivalsEl.appendChild(createEmptyState("Sin datos de llegadas para esta parada."));
     return;
   }
 
@@ -540,9 +525,27 @@ function updateStopSummary(stop: StopSummary): void {
     const lineCount = stop.lines.length;
     stopHelperEl.textContent =
       lineCount > 0
-        ? `Mostrando ${lineCount} línea${lineCount === 1 ? "" : "s"} configuradas`
-        : "Sin líneas configuradas para esta parada";
+        ? `${lineCount} línea${lineCount === 1 ? "" : "s"} con servicio en esta parada`
+        : "Sin líneas asociadas a esta parada";
   }
+}
+
+function showSelectionState(): void {
+  currentStopId = null;
+  currentStopLabel?.setAttribute("hidden", "");
+  nextArrivalsEl?.replaceChildren(
+    createEmptyState("Selecciona una parada para consultar las próximas llegadas."),
+  );
+  arrivalsEl?.replaceChildren(
+    createEmptyState("Busca por nombre o número de parada para ver todos los buses."),
+  );
+  if (stopNameEl) {
+    stopNameEl.textContent = "Ninguna parada seleccionada";
+  }
+  if (stopHelperEl) {
+    stopHelperEl.textContent = `${allStops.length} ${allStops.length === 1 ? "parada disponible" : "paradas disponibles"}`;
+  }
+  setStatus("Busca y selecciona una parada para consultar sus llegadas.");
 }
 
 function showUnavailableState(reason: string): void {
@@ -571,6 +574,7 @@ function updateCurrentStopLabel(stop: StopSummary): void {
   prefix.textContent = "Parada seleccionada:";
   const value = document.createElement("strong");
   value.textContent = `${stop.id} - ${stop.name}`;
+  currentStopLabel.removeAttribute("hidden");
   currentStopLabel.replaceChildren(prefix, document.createTextNode(" "), value);
 }
 
@@ -579,10 +583,6 @@ function createEmptyState(text: string): HTMLDivElement {
   empty.className = "empty-state";
   empty.textContent = text;
   return empty;
-}
-
-function createFallbackStop(stopId: number): StopSummary {
-  return { id: stopId, name: `Parada ${stopId}`, latitude: 0, longitude: 0, lines: [] };
 }
 
 function applyLineColor(element: HTMLElement, color: string | null): void {
@@ -634,9 +634,6 @@ function renderBusyState(): void {
   mainEl?.setAttribute("aria-busy", String(busy));
   nextArrivalsEl?.setAttribute("aria-busy", String(busy));
   arrivalsEl?.setAttribute("aria-busy", String(busy));
-  if (homeButton) {
-    homeButton.disabled = busy;
-  }
 }
 
 function setStatus(text: string): void {
@@ -723,18 +720,14 @@ function parseSearchPayload(raw: unknown): SearchToolPayload | null {
   if (raw.total !== stops.length) {
     return null;
   }
-  if (raw.primaryStopId !== undefined && !isPositiveInteger(raw.primaryStopId)) {
-    return null;
-  }
   return {
     total: raw.total,
     stops,
-    primaryStopId: raw.primaryStopId as number | undefined,
   };
 }
 
 function parseArrivalsPayload(raw: unknown): ArrivalsToolPayload | null {
-  if (!isRecord(raw) || !isPositiveInteger(raw.primaryStopId)) {
+  if (!isRecord(raw)) {
     return null;
   }
   if (raw.stop !== null && !isStopSummary(raw.stop)) {
@@ -752,7 +745,6 @@ function parseArrivalsPayload(raw: unknown): ArrivalsToolPayload | null {
     return null;
   }
   return {
-    primaryStopId: raw.primaryStopId,
     stop,
     arrivals,
     message: raw.message as string | undefined,

@@ -15,6 +15,7 @@
     "build": "npm run build:app && npm run build:server",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.server.json --noEmit",
     "test": "npm run build && node --test tests/*.test.mjs",
+    "update:catalog": "tsx scripts/update-catalog.ts",
     "dev:app": "vite build --watch",
     "dev:server": "tsx watch main.ts",
     "dev": "concurrently \"npm run dev:app\" \"npm run dev:server\"",

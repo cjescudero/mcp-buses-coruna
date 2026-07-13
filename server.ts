@@ -8,16 +8,16 @@ import {
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
 import { z } from "zod";
+import {
+  getCatalogMetadata,
+  loadTransitCatalog,
+  type CatalogMetadata,
+  type LineSummary,
+  type StopSummary,
+  type TransitCatalog,
+} from "./catalog.js";
 
 type JsonObject = Record<string, unknown>;
-
-interface StopSummary {
-  id: number;
-  name: string;
-  latitude: number;
-  longitude: number;
-  lines: number[];
-}
 
 interface ArrivalBus {
   bus_id: number;
@@ -39,68 +39,50 @@ interface ArrivalsResponse {
   lines: LineArrivals[];
 }
 
-interface AppConfig {
-  primaryStopId: number;
-  interestLines: string[];
-}
-
-interface TransitRuntimeConfig extends AppConfig {
-  stopsSourceUrl: string;
+interface TransitRuntimeConfig {
   arrivalsUrlTemplate: string;
-  cacheTtlSeconds: number;
   httpTimeoutMs: number;
 }
 
 export interface TransitBackend {
-  readonly config: TransitRuntimeConfig;
   readonly transit: TransitService;
-}
-
-interface LineMeta {
-  name: string;
-  nameLower: string;
-  color: string | null;
+  readonly catalog: CatalogMetadata;
 }
 
 class TransitServiceError extends Error {}
 
 class TransitService {
-  private stopsCache: StopSummary[] | null = null;
-  private cacheExpiresAt = 0;
-  private retryAfter = 0;
-  private loadingStopsPromise: Promise<StopSummary[]> | null = null;
-  private linesInfo = new Map<number, LineMeta>();
-  private interestLineIds = new Set<number>();
-  private readonly interestLineNames: Set<string>;
-  readonly primaryStopId: number;
+  private readonly stopsById: ReadonlyMap<number, StopSummary>;
+  private readonly linesById: ReadonlyMap<number, LineSummary>;
 
-  constructor(private readonly config: TransitRuntimeConfig) {
-    this.primaryStopId = config.primaryStopId;
-    this.interestLineNames = new Set(
-      config.interestLines.map((line) => line.trim().toLowerCase()).filter(Boolean),
-    );
+  constructor(
+    private readonly config: TransitRuntimeConfig,
+    private readonly catalog: TransitCatalog,
+  ) {
+    this.stopsById = new Map(catalog.stops.map((stop) => [stop.id, stop]));
+    this.linesById = new Map(catalog.lines.map((line) => [line.line_id, line]));
   }
 
-  async searchStops(query: string | undefined, limit = 50): Promise<StopSummary[]> {
-    const stops = this.filterInterestStops(await this.loadStops());
+  searchStops(query: string | undefined, limit?: number): StopSummary[] {
     const normalized = query?.trim().toLowerCase();
-    if (!normalized) {
-      return stops.slice(0, limit);
-    }
-    return stops.filter((stop) => stop.name.toLowerCase().includes(normalized)).slice(0, limit);
+    const matchingStops = normalized
+      ? this.catalog.stops.filter(
+          (stop) =>
+            stop.name.toLowerCase().includes(normalized) || String(stop.id).includes(normalized),
+        )
+      : this.catalog.stops;
+    return limit === undefined ? [...matchingStops] : matchingStops.slice(0, limit);
   }
 
-  async getStop(stopId: number): Promise<StopSummary | null> {
-    const stops = await this.loadStops();
-    const stop = stops.find((item) => item.id === stopId);
-    return stop ? this.applyInterestToStop(stop) : null;
+  getStop(stopId: number): StopSummary | null {
+    return this.stopsById.get(stopId) ?? null;
+  }
+
+  listLines(): LineSummary[] {
+    return [...this.catalog.lines];
   }
 
   async getArrivals(stopId: number): Promise<ArrivalsResponse> {
-    if (this.linesInfo.size === 0) {
-      await this.loadStops();
-    }
-
     const payload = await this.fetchJson(this.config.arrivalsUrlTemplate.replace("{stop_id}", String(stopId)));
     const parsed = arrivalsPayloadSchema.safeParse(payload);
     if (!parsed.success) {
@@ -119,11 +101,7 @@ class TransitService {
         continue;
       }
 
-      const meta = this.linesInfo.get(lineId) ?? null;
-      if (!this.isInterestLine(lineId, meta)) {
-        continue;
-      }
-
+      const meta = this.linesById.get(lineId) ?? null;
       const busesData: ArrivalBus[] = [];
       for (const rawBus of asArray(lineObject.buses)) {
         const busObject = asObject(rawBus);
@@ -146,83 +124,13 @@ class TransitService {
       busesData.sort((a, b) => toSortEta(a.eta_minutes) - toSortEta(b.eta_minutes));
       lines.push({
         line_id: lineId,
-        line_name: meta?.name ?? null,
-        color_hex: meta?.color ?? null,
+        line_name: meta?.line_name ?? null,
+        color_hex: meta?.color_hex ?? null,
         buses: busesData,
       });
     }
 
-    lines.sort((a, b) => {
-      const aEta = a.buses.length > 0 ? toSortEta(a.buses[0].eta_minutes) : Number.MAX_SAFE_INTEGER;
-      const bEta = b.buses.length > 0 ? toSortEta(b.buses[0].eta_minutes) : Number.MAX_SAFE_INTEGER;
-      return aEta - bEta;
-    });
-
     return { stop_id: stopId, lines };
-  }
-
-  private async loadStops(force = false): Promise<StopSummary[]> {
-    const now = Date.now();
-    if (!force && this.stopsCache && now < this.cacheExpiresAt) {
-      return this.stopsCache;
-    }
-    if (!force && this.stopsCache && now < this.retryAfter) {
-      return this.stopsCache;
-    }
-
-    if (this.loadingStopsPromise) {
-      return this.loadingStopsPromise;
-    }
-
-    this.loadingStopsPromise = this.loadStopsInternal(force);
-    try {
-      return await this.loadingStopsPromise;
-    } finally {
-      this.loadingStopsPromise = null;
-    }
-  }
-
-  private async loadStopsInternal(force: boolean): Promise<StopSummary[]> {
-    const now = Date.now();
-    if (!force && this.stopsCache && now < this.cacheExpiresAt) {
-      return this.stopsCache;
-    }
-
-    const previousLinesInfo = this.linesInfo;
-    const previousInterestLineIds = this.interestLineIds;
-    try {
-      const payload = await this.fetchJson(this.config.stopsSourceUrl);
-      const parsed = stopsPayloadSchema.safeParse(payload);
-      if (!parsed.success) {
-        throw new TransitServiceError("transit_api_invalid_stops_payload");
-      }
-      const rawStops = parsed.data.iTranvias.actualizacion.paradas;
-      const rawLines = parsed.data.iTranvias.actualizacion.lineas;
-
-      const nextLinesInfo = this.parseLineInfo(rawLines);
-      const nextStopsCache = rawStops
-        .map((item) => this.mapStop(item))
-        .filter((item): item is StopSummary => item !== null);
-      if (nextStopsCache.length === 0) {
-        throw new TransitServiceError("transit_api_empty_stops_payload");
-      }
-      this.linesInfo = nextLinesInfo;
-      this.stopsCache = nextStopsCache;
-      this.retryAfter = 0;
-      this.setCacheExpiry();
-      return this.stopsCache;
-    } catch (error) {
-      if (this.stopsCache) {
-        this.linesInfo = previousLinesInfo;
-        this.interestLineIds = previousInterestLineIds;
-        // Keep serving the last known good catalog, but retry after a short backoff.
-        this.retryAfter = Date.now() + 30_000;
-        return this.stopsCache;
-      }
-      throw error instanceof TransitServiceError
-        ? error
-        : new TransitServiceError("transit_api_unavailable");
-    }
   }
 
   private async fetchJson(url: string): Promise<JsonObject> {
@@ -247,115 +155,7 @@ class TransitService {
       clearTimeout(timeout);
     }
   }
-
-  private parseLineInfo(linesRaw: unknown[]): Map<number, LineMeta> {
-    const info = new Map<number, LineMeta>();
-    const interestIds = new Set<number>();
-
-    for (const lineRaw of linesRaw) {
-      const line = asObject(lineRaw);
-      if (!line) {
-        continue;
-      }
-      const lineId = safeInt(line.id);
-      if (lineId === null) {
-        continue;
-      }
-
-      const name = String(line.lin_comer ?? lineId).trim();
-      const normalizedName = name.toLowerCase();
-      const color = formatColor(line.color);
-      info.set(lineId, { name, nameLower: normalizedName, color });
-
-      if (
-        this.interestLineNames.has(normalizedName) ||
-        this.interestLineNames.has(String(lineId).toLowerCase())
-      ) {
-        interestIds.add(lineId);
-      }
-    }
-
-    this.interestLineIds = interestIds;
-    return info;
-  }
-
-  private filterInterestStops(stops: StopSummary[]): StopSummary[] {
-    if (this.interestLineNames.size === 0) {
-      return [...stops].sort((a, b) => a.name.localeCompare(b.name, "es"));
-    }
-    const filtered: StopSummary[] = [];
-    for (const stop of stops) {
-      const transformed = this.applyInterestToStop(stop);
-      if (transformed.lines.length > 0) {
-        filtered.push(transformed);
-      }
-    }
-    return filtered.sort((a, b) => a.name.localeCompare(b.name, "es"));
-  }
-
-  private applyInterestToStop(stop: StopSummary): StopSummary {
-    if (this.interestLineNames.size === 0) {
-      return { ...stop, lines: [...stop.lines] };
-    }
-    return {
-      ...stop,
-      lines: stop.lines.filter((lineId) => this.interestLineIds.has(lineId)),
-    };
-  }
-
-  private isInterestLine(lineId: number, lineMeta: LineMeta | null): boolean {
-    if (this.interestLineNames.size === 0) {
-      return true;
-    }
-    if (this.interestLineIds.has(lineId)) {
-      return true;
-    }
-    if (this.interestLineNames.has(String(lineId).toLowerCase())) {
-      return true;
-    }
-    if (lineMeta && this.interestLineNames.has(lineMeta.nameLower)) {
-      return true;
-    }
-    return false;
-  }
-
-  private mapStop(rawStop: unknown): StopSummary | null {
-    const stop = asObject(rawStop);
-    if (!stop) {
-      return null;
-    }
-    const stopId = safeInt(stop.id);
-    if (stopId === null) {
-      return null;
-    }
-    const lineIds = asArray(stop.enlaces)
-      .map((line) => safeInt(line))
-      .filter((line): line is number => line !== null);
-
-    return {
-      id: stopId,
-      name: String(stop.nombre ?? `Parada ${stopId}`),
-      latitude: safeFloat(stop.posy) ?? 0,
-      longitude: safeFloat(stop.posx) ?? 0,
-      lines: lineIds,
-    };
-  }
-
-  private setCacheExpiry(): void {
-    const ttl = this.config.cacheTtlSeconds;
-    // A zero TTL explicitly disables caching; finite defaults avoid stale data forever.
-    this.cacheExpiresAt = ttl > 0 ? Date.now() + ttl * 1000 : 0;
-  }
 }
-
-const stopsPayloadSchema = z.object({
-  iTranvias: z.object({
-    actualizacion: z.object({
-      paradas: z.array(z.unknown()),
-      lineas: z.array(z.unknown()),
-    }).passthrough(),
-  }).passthrough(),
-}).passthrough();
 
 const arrivalsPayloadSchema = z.object({
   buses: z.object({
@@ -363,23 +163,8 @@ const arrivalsPayloadSchema = z.object({
   }).passthrough(),
 }).passthrough();
 
-const positiveIntegerConfigSchema = z.union([
-  z.number().int().positive(),
-  z.string().regex(/^\d+$/).transform(Number).pipe(z.number().int().positive()),
-]);
-
-const appConfigFileSchema = z.object({
-  primary_stop_id: positiveIntegerConfigSchema.optional(),
-  interest_lines: z.array(z.union([z.string(), z.number().finite()])).optional(),
-}).passthrough();
-
 const DEFAULTS: TransitRuntimeConfig = {
-  primaryStopId: 42,
-  interestLines: ["3", "3A", "12", "14"],
-  stopsSourceUrl:
-    "https://itranvias.com/queryitr_v3.php?dato=20160101T000000_gl_0_20160101T000000&func=7",
   arrivalsUrlTemplate: "https://itranvias.com/queryitr_v3.php?func=0&dato={stop_id}",
-  cacheTtlSeconds: 300,
   httpTimeoutMs: 8000,
 };
 
@@ -391,17 +176,11 @@ const DIST_HTML_PATH = path.basename(MODULE_DIR) === "dist"
 let resourceHtmlCache: string | null = null;
 
 function createTransitConfig(): TransitRuntimeConfig {
-  const appConfig = loadAppConfig();
-  const cacheTtlSeconds = parseEnvNumber("CACHE_TTL_SECONDS", DEFAULTS.cacheTtlSeconds, 0, 86_400);
   const httpTimeoutSeconds = parseEnvNumber(
     "HTTP_TIMEOUT_SECONDS",
     DEFAULTS.httpTimeoutMs / 1000,
     1,
     120,
-  );
-  const stopsSourceUrl = validateHttpUrl(
-    "STOPS_SOURCE_URL",
-    process.env.STOPS_SOURCE_URL ?? DEFAULTS.stopsSourceUrl,
   );
   const arrivalsUrlTemplate = validateHttpUrl(
     "ARRIVALS_URL_TEMPLATE",
@@ -412,54 +191,8 @@ function createTransitConfig(): TransitRuntimeConfig {
   }
 
   return {
-    primaryStopId: appConfig.primaryStopId,
-    interestLines: appConfig.interestLines,
-    stopsSourceUrl,
     arrivalsUrlTemplate,
-    cacheTtlSeconds,
     httpTimeoutMs: Math.max(1000, Math.round(httpTimeoutSeconds * 1000)),
-  };
-}
-
-function loadAppConfig(): AppConfig {
-  const explicitConfigPath = process.env.APP_CONFIG_PATH;
-  const candidates = [
-    explicitConfigPath,
-    path.join(process.cwd(), "config", "app_config.json"),
-    path.join(process.cwd(), "..", "busesyparadas", "config", "app_config.json"),
-    path.join(process.cwd(), "busesyparadas", "config", "app_config.json"),
-  ].filter((item): item is string => Boolean(item));
-
-  for (const candidate of candidates) {
-    if (!existsSync(candidate)) {
-      if (candidate === explicitConfigPath) {
-        throw new Error(`APP_CONFIG_PATH no existe: ${candidate}`);
-      }
-      continue;
-    }
-    try {
-      const data = appConfigFileSchema.parse(JSON.parse(readFileSync(candidate, "utf8")));
-      const primaryStopId = data.primary_stop_id ?? DEFAULTS.primaryStopId;
-      const rawInterestLines = data.interest_lines ?? [];
-      const interestLines = rawInterestLines
-        .map((line) => String(line).trim())
-        .filter((line) => line.length > 0);
-      return {
-        primaryStopId,
-        interestLines: interestLines.length > 0 ? interestLines : DEFAULTS.interestLines,
-      };
-    } catch (error) {
-      if (candidate === explicitConfigPath) {
-        const detail = error instanceof Error ? error.message : "configuración inválida";
-        throw new Error(`APP_CONFIG_PATH inválido (${detail})`);
-      }
-      continue;
-    }
-  }
-
-  return {
-    primaryStopId: DEFAULTS.primaryStopId,
-    interestLines: DEFAULTS.interestLines,
   };
 }
 
@@ -478,7 +211,7 @@ function resolveResourceHtml(): string {
 
 function summarizeArrivals(stop: StopSummary, arrivals: ArrivalsResponse): string {
   if (arrivals.lines.length === 0) {
-    return `${stop.id} - ${stop.name}: sin llegadas para las líneas configuradas.`;
+    return `${stop.id} - ${stop.name}: sin llegadas registradas.`;
   }
   const next = arrivals.lines
     .slice(0, 4)
@@ -506,41 +239,25 @@ function formatEta(value: number | null): string {
 
 export function createTransitBackend(): TransitBackend {
   const config = createTransitConfig();
-  return { config, transit: new TransitService(config) };
+  const staticCatalog = loadTransitCatalog();
+  return {
+    catalog: getCatalogMetadata(staticCatalog),
+    transit: new TransitService(config, staticCatalog),
+  };
 }
 
 export function createServer(backend: TransitBackend = createTransitBackend()): McpServer {
   const server = new McpServer({
-    name: "buses-coruna-mcp",
+    name: "buses-coruna-mcp-server",
     version: "1.0.0",
   });
 
-  const { config, transit } = backend;
+  const { transit, catalog } = backend;
   // Fail during startup instead of reporting a healthy MCP whose UI resource
   // will fail only when a host attempts to open it.
   const resourceHtml = resolveResourceHtml();
   const getArrivalsForStop = async (selectedStopId: number) => {
-    let stop: StopSummary | null;
-    try {
-      stop = await transit.getStop(selectedStopId);
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : "transit_api_unavailable";
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `No se pudo consultar el catálogo de paradas (${detail}).`,
-          },
-        ],
-        structuredContent: {
-          primaryStopId: config.primaryStopId,
-          stop: null,
-          arrivals: null,
-          message: detail,
-        },
-        isError: true,
-      };
-    }
+    const stop = transit.getStop(selectedStopId);
 
     if (!stop) {
       return {
@@ -551,10 +268,10 @@ export function createServer(backend: TransitBackend = createTransitBackend()): 
           },
         ],
         structuredContent: {
-          primaryStopId: config.primaryStopId,
           stop: null,
           arrivals: null,
           message: "stop_not_found",
+          catalog,
         },
         isError: true,
       };
@@ -570,9 +287,9 @@ export function createServer(backend: TransitBackend = createTransitBackend()): 
           },
         ],
         structuredContent: {
-          primaryStopId: config.primaryStopId,
           stop,
           arrivals,
+          catalog,
         },
       };
     } catch (error) {
@@ -585,10 +302,10 @@ export function createServer(backend: TransitBackend = createTransitBackend()): 
           },
         ],
         structuredContent: {
-          primaryStopId: config.primaryStopId,
           stop,
           arrivals: null,
           message: detail,
+          catalog,
         },
         isError: true,
       };
@@ -601,14 +318,19 @@ export function createServer(backend: TransitBackend = createTransitBackend()): 
     {
       title: "Llegadas de buses (A Coruña)",
       description:
-        "Muestra llegadas de una parada. Si no se indica stopId, usa automáticamente la parada principal configurada.",
+        "Muestra las llegadas de todas las líneas para una parada de A Coruña.",
       inputSchema: {
         stopId: z
           .number()
           .int()
           .positive()
-          .optional()
-          .describe("ID de parada (opcional). Si se omite, se usa la parada principal."),
+          .describe("ID positivo de la parada que se desea consultar."),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
       },
       _meta: {
         ui: {
@@ -616,24 +338,7 @@ export function createServer(backend: TransitBackend = createTransitBackend()): 
         },
       },
     },
-    async ({ stopId }) => getArrivalsForStop(stopId ?? config.primaryStopId),
-  );
-
-  registerAppTool(
-    server,
-    "show_default_bus_arrivals",
-    {
-      title: "Llegadas de buses (parada por defecto)",
-      description:
-        "Muestra llegadas usando siempre la parada principal configurada. Útil para consultas genéricas sin indicar parada.",
-      inputSchema: {},
-      _meta: {
-        ui: {
-          resourceUri: APP_RESOURCE_URI,
-        },
-      },
-    },
-    async () => getArrivalsForStop(config.primaryStopId),
+    async ({ stopId }) => getArrivalsForStop(stopId),
   );
 
   registerAppTool(
@@ -641,10 +346,26 @@ export function createServer(backend: TransitBackend = createTransitBackend()): 
     "search_stops",
     {
       title: "Buscar paradas",
-      description: "Devuelve paradas filtradas por líneas de interés para usar en el buscador de la UI.",
+      description:
+        "Devuelve todas las paradas, o las que coincidan por nombre o ID, sin filtrar por líneas.",
       inputSchema: {
-        query: z.string().optional(),
-        limit: z.number().int().min(1).max(400).optional(),
+        query: z
+          .string()
+          .optional()
+          .describe("Texto opcional que debe aparecer en el nombre o ID de la parada."),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(400)
+          .optional()
+          .describe("Número máximo opcional de coincidencias, entre 1 y 400."),
+      },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
       },
       _meta: {
         ui: {
@@ -655,7 +376,7 @@ export function createServer(backend: TransitBackend = createTransitBackend()): 
     },
     async ({ query, limit }) => {
       try {
-        const stops = await transit.searchStops(query, limit ?? 50);
+        const stops = await transit.searchStops(query, limit);
         return {
           content: [
             {
@@ -666,14 +387,60 @@ export function createServer(backend: TransitBackend = createTransitBackend()): 
           structuredContent: {
             total: stops.length,
             stops,
-            primaryStopId: config.primaryStopId,
+            catalog,
           },
         };
       } catch (error) {
         const detail = error instanceof Error ? error.message : "transit_api_unavailable";
         return {
           content: [{ type: "text" as const, text: `No se pudieron recuperar las paradas (${detail}).` }],
-          structuredContent: { total: 0, stops: [], primaryStopId: config.primaryStopId, message: detail },
+          structuredContent: { total: 0, stops: [], message: detail, catalog },
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_bus_lines",
+    {
+      title: "Listar líneas de bus",
+      description:
+        "Devuelve todas las líneas del catálogo estático de A Coruña.",
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async () => {
+      try {
+        const lines = await transit.listLines();
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Encontradas ${lines.length} líneas.`,
+            },
+          ],
+          structuredContent: {
+            total: lines.length,
+            lines,
+            catalog,
+          },
+        };
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "transit_api_unavailable";
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `No se pudieron recuperar las líneas (${detail}).`,
+            },
+          ],
+          structuredContent: { total: 0, lines: [], message: detail, catalog },
           isError: true,
         };
       }
@@ -728,21 +495,6 @@ function safeInt(value: unknown): number | null {
   return null;
 }
 
-function safeFloat(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-  if (typeof value === "string") {
-    const normalized = value.trim();
-    if (normalized.length === 0) {
-      return null;
-    }
-    const parsed = Number(normalized);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
 function parseEnvNumber(name: string, fallback: number, min: number, max: number): number {
   const raw = process.env[name];
   if (raw === undefined) {
@@ -774,15 +526,4 @@ function validateHttpUrl(name: string, raw: string): string {
 
 function toSortEta(eta: number | null): number {
   return eta ?? Number.MAX_SAFE_INTEGER;
-}
-
-function formatColor(rawColor: unknown): string | null {
-  if (typeof rawColor !== "string" || rawColor.trim().length === 0) {
-    return null;
-  }
-  const color = rawColor.trim();
-  if (color.startsWith("#")) {
-    return color;
-  }
-  return `#${color.padStart(6, "0")}`;
 }

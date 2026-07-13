@@ -128,7 +128,7 @@ async function startHttpServer(): Promise<void> {
   app.use(express.json({ limit: "2mb", type: ["application/json", "application/*+json"] }));
 
   app.get("/health", (_req, res) => {
-    res.json({ status: "ok", transport: "streamable-http" });
+    res.json({ status: "ok", transport: "streamable-http", ...backend.catalog });
   });
 
   app.all("/mcp", (req, res, next) => {

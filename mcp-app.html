@@ -22,7 +22,7 @@
             id="stop-search"
             type="search"
             inputmode="text"
-            placeholder="Ejemplo: Av. de Oza, Plaza de Lugo..."
+            placeholder="Nombre o número de parada"
             autocomplete="off"
             role="combobox"
             aria-autocomplete="list"
@@ -30,27 +30,30 @@
             aria-expanded="false"
             aria-describedby="results-status"
           />
-          <button class="home-btn" id="home-button" type="button" aria-label="Usar parada principal">Inicio</button>
         </div>
         <ul class="autocomplete" id="stop-results" role="listbox" aria-label="Resultados de paradas" hidden></ul>
         <p class="sr-only" id="results-status" role="status" aria-live="polite" aria-atomic="true"></p>
-        <p class="current-stop" id="current-stop-label" aria-live="polite" aria-atomic="true"></p>
+        <p class="current-stop" id="current-stop-label" aria-live="polite" aria-atomic="true" hidden></p>
       </section>
 
       <section class="card next-card" aria-labelledby="next-heading">
         <div class="section-heading">
           <h2 class="eyebrow" id="next-heading">Buses más próximos</h2>
         </div>
-        <div class="next-arrivals" id="next-arrivals" aria-busy="false"></div>
+        <div class="next-arrivals" id="next-arrivals" aria-busy="false">
+          <div class="empty-state">Selecciona una parada para consultar las próximas llegadas.</div>
+        </div>
       </section>
 
       <section class="card arrivals-card" aria-labelledby="stop-name">
         <div class="section-heading">
           <p class="eyebrow">Resto de buses</p>
         </div>
-        <h2 id="stop-name">&nbsp;</h2>
-        <p class="muted" id="stop-helper">Parada principal</p>
-        <div class="arrivals" id="arrivals" aria-busy="false"></div>
+        <h2 id="stop-name">Ninguna parada seleccionada</h2>
+        <p class="muted" id="stop-helper">Carga el catálogo para empezar</p>
+        <div class="arrivals" id="arrivals" aria-busy="false">
+          <div class="empty-state">Busca por nombre o número de parada para ver todos los buses.</div>
+        </div>
         <p class="status-text" id="status" role="status" aria-live="polite" aria-atomic="true"></p>
       </section>
     </main>

@@ -1,6 +1,13 @@
 # MCP Buses Coruña
 
-Servidor MCP con una app embebida para consultar paradas y llegadas de los buses urbanos de A Coruña. Obtiene el catálogo y las llegadas de iTranvias, filtra las líneas configuradas y ofrece transporte local `stdio` o Streamable HTTP.
+Wrapper MCP de la API iTranvias usada por la Compañía de Tranvías de A Coruña. Expone, sin priorizar ni ocultar paradas o líneas:
+
+- el catálogo completo de líneas, rutas y paradas desde un snapshot local versionado;
+- las llegadas en tiempo real de una parada indicada por su identificador (`func=0`).
+
+Incluye una app embebida y puede ejecutarse mediante `stdio` o Streamable HTTP. No conserva la configuración funcional de la aplicación de la que procede: no hay parada principal, líneas de interés ni valores predeterminados de negocio.
+
+En una ejecución normal, `list_bus_lines` y `search_stops` no acceden a iTranvias. El servidor carga el catálogo desde disco al arrancar y reserva la API externa para `show_bus_arrivals`. Así se evitan descargas repetidas de la estructura completa, se reduce la carga sobre el proveedor y las búsquedas siguen disponibles aunque la API esté temporalmente degradada.
 
 ## Requisitos y puesta en marcha
 
@@ -14,44 +21,60 @@ npm run build
 npm run serve
 ```
 
-El transporte predeterminado es `stdio`, apropiado para clientes MCP que ejecutan el proceso localmente. No requiere acceso a red salvo para consultar iTranvias.
+El transporte predeterminado es `stdio`, apropiado para clientes MCP que ejecutan el proceso localmente. Solo las consultas de llegadas requieren acceso a red.
 
 ## Herramientas
 
-- `show_bus_arrivals`: llegadas de `stopId`, o de la parada principal si se omite.
-- `show_default_bus_arrivals`: llegadas de la parada principal.
-- `search_stops`: busca paradas por nombre, con un límite entre 1 y 400.
+- `list_bus_lines`: devuelve todas las líneas del catálogo local. Cada línea incluye `line_id`, `line_name`, `origin`, `destination`, `color_hex` y sus recorridos como `routes` (`route_id`, `origin`, `destination` y `stop_ids`).
+- `search_stops`: devuelve el catálogo de paradas o lo filtra por nombre o identificador. `query` es opcional y `limit` admite valores entre 1 y 400.
+- `show_bus_arrivals`: devuelve las llegadas de la parada indicada. `stopId` es obligatorio.
 
-Las respuestas incluyen texto y `structuredContent`. Una parada inexistente o un fallo del proveedor se devuelve como error de herramienta (`isError: true`).
+Las respuestas incluyen texto y `structuredContent`. Las tres herramientas incorporan `structuredContent.catalog`, con `schema_version`, `generated_at`, `line_count` y `stop_count`; así puede identificarse exactamente qué snapshot respalda el resultado. Una parada inexistente o un fallo del proveedor se devuelve como error de herramienta (`isError: true`).
 
-## Configuración de tránsito
+## Catálogo local
 
-La configuración funcional se lee del primer archivo existente:
+El catálogo distribuido en `data/transit-catalog.json` contiene una copia normalizada de las líneas, rutas y paradas. Se versiona junto al código, se valida al arrancar y no se modifica durante la ejecución. Un cambio de red de transporte requiere actualizar ese archivo y desplegar la nueva versión, pero no cambiar el código ni la estructura del MCP.
 
-1. `APP_CONFIG_PATH`.
-2. `config/app_config.json`.
-3. `../busesyparadas/config/app_config.json`.
-4. `busesyparadas/config/app_config.json`.
+Para usar otro snapshot compatible sin recompilar:
 
-Ejemplo:
-
-```json
-{
-  "primary_stop_id": 42,
-  "interest_lines": ["3", "3A", "12", "14"]
-}
+```bash
+CATALOG_PATH=/ruta/al/transit-catalog.json npm run serve
 ```
 
-Variables opcionales:
+`CATALOG_PATH` debe apuntar a un archivo con el mismo esquema normalizado. La fecha `generated_at` se publica como `structuredContent.catalog.generated_at` en las herramientas y como `generated_at` en `/health`, lo que permite detectar un despliegue desactualizado.
+
+### Actualización manual
+
+La actualización es una operación explícita de mantenimiento, nunca una tarea automática del servidor:
+
+```bash
+npm run update:catalog
+npm test
+```
+
+El actualizador descarga mediante `func=7`, valida y normaliza la respuesta y sustituye el snapshot de forma atómica. Si la descarga o la validación falla, conserva intacto el catálogo anterior. Conviene revisar el diff —altas y bajas de líneas, rutas y paradas— antes de confirmar y desplegar el archivo.
+
+El valor opaco `dato=20160101T000000_gl_0_20160101T000000` de la URL `func=7` es el parámetro que iTranvias requiere para solicitar el snapshot completo. La API real responde que los parámetros no son válidos si se omite. Por tanto, este valor forma parte del protocolo del proveedor y no expresa una fecha, parada, línea ni preferencia de negocio del MCP.
+
+Variables exclusivas del actualizador:
+
+| Variable | Predeterminado | Descripción |
+| --- | --- | --- |
+| `CATALOG_SOURCE_URL` | URL iTranvias `func=7` | Origen HTTP(S) usado por `npm run update:catalog` |
+| `CATALOG_PATH` | `data/transit-catalog.json` | Destino del snapshot; también sirve como override del runtime |
+| `CATALOG_TIMEOUT_SECONDS` | `20` | Tiempo máximo de descarga, entre 1 y 120 segundos |
+
+`CATALOG_SOURCE_URL` y `CATALOG_TIMEOUT_SECONDS` no se leen en runtime. No configures una actualización periódica en cada instancia del MCP: hazla una sola vez, revisa el resultado y distribuye el snapshot validado.
+
+## Llegadas y configuración del runtime
+
+En runtime, la única operación remota es `func=0`. Puede dirigirse a un proxy o a otra instancia compatible mediante `ARRIVALS_URL_TEMPLATE`; el marcador `{stop_id}` es obligatorio.
 
 | Variable | Predeterminado | Restricción |
 | --- | --- | --- |
-| `STOPS_SOURCE_URL` | URL de iTranvias `func=7` | URL HTTP(S) válida |
-| `ARRIVALS_URL_TEMPLATE` | URL de iTranvias `func=0` | URL HTTP(S) con `{stop_id}` |
-| `CACHE_TTL_SECONDS` | `300` | Entero no negativo; `0` desactiva la caché |
+| `CATALOG_PATH` | `data/transit-catalog.json` | Snapshot local normalizado y legible |
+| `ARRIVALS_URL_TEMPLATE` | `https://itranvias.com/queryitr_v3.php?func=0&dato={stop_id}` | URL HTTP(S) con `{stop_id}` |
 | `HTTP_TIMEOUT_SECONDS` | `8` | Número entre 1 y 120 |
-
-El catálogo se valida antes de entrar en caché. Si el proveedor falla, el servidor no crea ni conserva paradas ficticias.
 
 ## Transporte HTTP
 
@@ -109,8 +132,7 @@ Archivo `/etc/mcp-buses-coruna.env`:
 MCP_TRANSPORT=http
 HOST=127.0.0.1
 PORT=3001
-APP_CONFIG_PATH=/opt/mcp-buses-coruna/config/app_config.json
-CACHE_TTL_SECONDS=300
+CATALOG_PATH=/opt/mcp-buses-coruna/data/transit-catalog.json
 HTTP_TIMEOUT_SECONDS=8
 MCP_ALLOWED_ORIGINS=https://cliente.example.org
 MCP_ALLOWED_HOSTS=mcp.example.org
@@ -193,4 +215,4 @@ npm run build           # ambos
 npm test                # build y pruebas sin depender de la red pública
 ```
 
-Las pruebas de integración arrancan una API iTranvias simulada y ejercitan el MCP completo por `stdio`: descubrimiento, recurso UI, búsqueda, filtrado, orden de llegadas, errores y reutilización de caché.
+Las pruebas de integración usan un catálogo temporal y una API de llegadas simulada para ejercitar el MCP completo por `stdio`: descubrimiento, recurso UI, metadata del snapshot, catálogo sin priorización, búsqueda, orden de llegadas y errores. También verifican que ninguna llamada normal intenta descargar `func=7`.
