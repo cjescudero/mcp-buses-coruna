@@ -4,30 +4,37 @@
   "description": "MCP App para mostrar paradas y llegadas de buses en A Coruña.",
   "type": "module",
   "private": true,
+  "engines": {
+    "node": ">=20.19.0"
+  },
   "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build:app": "vite build",
     "build:server": "tsc -p tsconfig.server.json",
+    "prebuild": "npm run clean",
     "build": "npm run build:app && npm run build:server",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.server.json --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs",
     "dev:app": "vite build --watch",
     "dev:server": "tsx watch main.ts",
     "dev": "concurrently \"npm run dev:app\" \"npm run dev:server\"",
     "serve": "node --enable-source-maps dist/main.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/ext-apps": "latest",
-    "@modelcontextprotocol/sdk": "latest",
-    "cors": "latest",
-    "express": "latest",
-    "zod": "latest"
+    "@modelcontextprotocol/ext-apps": "1.7.4",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "cors": "2.8.5",
+    "express": "5.2.1",
+    "zod": "4.4.3"
   },
   "devDependencies": {
-    "@types/cors": "latest",
-    "@types/express": "latest",
-    "@types/node": "latest",
-    "concurrently": "latest",
-    "tsx": "latest",
-    "typescript": "latest",
-    "vite": "latest",
-    "vite-plugin-singlefile": "latest"
+    "@types/cors": "2.8.19",
+    "@types/express": "5.0.6",
+    "@types/node": "22.18.0",
+    "concurrently": "10.0.3",
+    "tsx": "4.23.1",
+    "typescript": "5.9.3",
+    "vite": "8.1.4",
+    "vite-plugin-singlefile": "2.3.3"
   }
 }

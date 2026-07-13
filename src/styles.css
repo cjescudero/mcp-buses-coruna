@@ -1,13 +1,23 @@
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
   --bg: radial-gradient(circle at top, #d8f3ff 0%, #f5f7fb 45%, #ffffff 100%);
   --fg: var(--color-text-primary, #0f172a);
   --muted: var(--color-text-secondary, #5b6474);
-  --muted-dark: #1e293b;
+  --heading: var(--color-text-primary, #1e293b);
   --card-bg: var(--color-background-primary, #ffffff);
+  --surface-secondary: var(--color-background-secondary, #f8fafc);
+  --surface-accent: var(--color-background-info, #eef4ff);
+  --input-bg: var(--color-background-primary, #ffffff);
+  --border: var(--color-border-primary, rgba(15, 23, 42, 0.11));
+  --border-subtle: var(--color-border-secondary, rgba(15, 23, 42, 0.07));
+  --shadow: rgba(15, 23, 42, 0.08);
   --accent: #2f7afe;
   --accent-dark: #1f5cd8;
   --radius: var(--border-radius-lg, 22px);
+  --safe-top: 0px;
+  --safe-right: 0px;
+  --safe-bottom: 0px;
+  --safe-left: 0px;
   font-size: 16px;
   font-family: var(--font-sans, "Segoe UI", "Inter", system-ui, sans-serif);
 }
@@ -21,6 +31,7 @@ body {
   min-height: 100vh;
   background: var(--bg);
   color: var(--fg);
+  padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
 }
 
 .layout {
@@ -40,15 +51,15 @@ body {
 .hero h1 {
   margin: 0;
   font-size: clamp(1.6rem, 5vw, 2.4rem);
-  color: var(--muted-dark);
+  color: var(--heading);
 }
 
 .card {
   background: var(--card-bg);
   border-radius: var(--radius);
   padding: 1rem;
-  border: 1px solid rgba(15, 23, 42, 0.07);
-  box-shadow: 0 16px 32px rgba(15, 23, 42, 0.08);
+  border: 1px solid var(--border-subtle);
+  box-shadow: 0 16px 32px var(--shadow);
 }
 
 .section-heading {
@@ -76,11 +87,12 @@ label {
 
 input[type="search"] {
   width: 100%;
-  border: 2px solid rgba(15, 23, 42, 0.14);
+  border: 2px solid var(--border);
   border-radius: 16px;
   padding: 0.8rem 5.4rem 0.8rem 0.9rem;
   font-size: 0.95rem;
-  background: #fff;
+  background: var(--input-bg);
+  color: var(--fg);
 }
 
 input[type="search"]:focus-visible {
@@ -110,21 +122,29 @@ input[type="search"]:focus-visible {
   outline-offset: 2px;
 }
 
+.home-btn:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .autocomplete {
   list-style: none;
   margin: 0.65rem 0 0;
   padding: 0;
   border-radius: 16px;
-  border: 1px solid rgba(15, 23, 42, 0.11);
+  border: 1px solid var(--border);
   max-height: 200px;
   overflow-y: auto;
-  background: #fff;
+  background: var(--input-bg);
+}
+
+.autocomplete[hidden] {
   display: none;
 }
 
 .autocomplete li {
   padding: 0.75rem 0.9rem;
-  border-bottom: 1px solid rgba(15, 23, 42, 0.06);
+  border-bottom: 1px solid var(--border-subtle);
   cursor: pointer;
 }
 
@@ -134,7 +154,12 @@ input[type="search"]:focus-visible {
 
 .autocomplete li:hover,
 .autocomplete li[aria-selected="true"] {
-  background: #eef4ff;
+  background: var(--surface-accent);
+}
+
+.autocomplete .no-results {
+  color: var(--muted);
+  cursor: default;
 }
 
 .current-stop {
@@ -161,7 +186,7 @@ input[type="search"]:focus-visible {
   --line-color: #2f7afe;
   border-radius: 14px;
   border-left: 5px solid var(--line-color);
-  background: #f2f6ff;
+  background: var(--surface-accent);
   padding: 0.8rem 0.9rem;
 }
 
@@ -191,9 +216,9 @@ input[type="search"]:focus-visible {
 .line-card {
   --line-color: #2f7afe;
   border-radius: 16px;
+  border: 1px solid var(--border-subtle);
   border-left: 5px solid var(--line-color);
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  background: #f8fafc;
+  background: var(--surface-secondary);
   padding: 0.85rem 1rem;
 }
 
@@ -212,8 +237,8 @@ input[type="search"]:focus-visible {
 .badge {
   border-radius: 12px;
   padding: 0.55rem 0.75rem;
-  background: #fff;
-  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: var(--card-bg);
+  border: 1px solid var(--border-subtle);
   min-width: 132px;
   font-weight: 600;
 }
@@ -243,6 +268,56 @@ input[type="search"]:focus-visible {
   text-align: center;
   font-weight: 600;
   background: rgba(15, 23, 42, 0.05);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+[aria-busy="true"] {
+  cursor: progress;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --bg: radial-gradient(circle at top, #15334a 0%, #111827 45%, #0b1220 100%);
+    --fg: var(--color-text-primary, #f1f5f9);
+    --muted: var(--color-text-secondary, #aeb9c8);
+    --heading: var(--color-text-primary, #f8fafc);
+    --card-bg: var(--color-background-primary, #172033);
+    --surface-secondary: var(--color-background-secondary, #202b3e);
+    --surface-accent: var(--color-background-info, #1c3150);
+    --input-bg: var(--color-background-primary, #172033);
+    --border: var(--color-border-primary, rgba(226, 232, 240, 0.24));
+    --border-subtle: var(--color-border-secondary, rgba(226, 232, 240, 0.14));
+    --shadow: rgba(0, 0, 0, 0.28);
+    --accent: #70a7ff;
+    --accent-dark: #9cc3ff;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: radial-gradient(circle at top, #15334a 0%, #111827 45%, #0b1220 100%);
+  --fg: var(--color-text-primary, #f1f5f9);
+  --muted: var(--color-text-secondary, #aeb9c8);
+  --heading: var(--color-text-primary, #f8fafc);
+  --card-bg: var(--color-background-primary, #172033);
+  --surface-secondary: var(--color-background-secondary, #202b3e);
+  --surface-accent: var(--color-background-info, #1c3150);
+  --input-bg: var(--color-background-primary, #172033);
+  --border: var(--color-border-primary, rgba(226, 232, 240, 0.24));
+  --border-subtle: var(--color-border-secondary, rgba(226, 232, 240, 0.14));
+  --shadow: rgba(0, 0, 0, 0.28);
+  --accent: #70a7ff;
+  --accent-dark: #9cc3ff;
 }
 
 @media (max-width: 680px) {

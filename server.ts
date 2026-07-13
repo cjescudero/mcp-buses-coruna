@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   registerAppResource,
@@ -50,6 +51,11 @@ interface TransitRuntimeConfig extends AppConfig {
   httpTimeoutMs: number;
 }
 
+export interface TransitBackend {
+  readonly config: TransitRuntimeConfig;
+  readonly transit: TransitService;
+}
+
 interface LineMeta {
   name: string;
   nameLower: string;
@@ -61,6 +67,7 @@ class TransitServiceError extends Error {}
 class TransitService {
   private stopsCache: StopSummary[] | null = null;
   private cacheExpiresAt = 0;
+  private retryAfter = 0;
   private loadingStopsPromise: Promise<StopSummary[]> | null = null;
   private linesInfo = new Map<number, LineMeta>();
   private interestLineIds = new Set<number>();
@@ -95,8 +102,11 @@ class TransitService {
     }
 
     const payload = await this.fetchJson(this.config.arrivalsUrlTemplate.replace("{stop_id}", String(stopId)));
-    const busesRoot = asObject(payload.buses);
-    const linesRaw = asArray(busesRoot?.lineas);
+    const parsed = arrivalsPayloadSchema.safeParse(payload);
+    if (!parsed.success) {
+      throw new TransitServiceError("transit_api_invalid_arrivals_payload");
+    }
+    const linesRaw = parsed.data.buses.lineas;
     const lines: LineArrivals[] = [];
 
     for (const rawLine of linesRaw) {
@@ -156,6 +166,9 @@ class TransitService {
     if (!force && this.stopsCache && now < this.cacheExpiresAt) {
       return this.stopsCache;
     }
+    if (!force && this.stopsCache && now < this.retryAfter) {
+      return this.stopsCache;
+    }
 
     if (this.loadingStopsPromise) {
       return this.loadingStopsPromise;
@@ -175,31 +188,40 @@ class TransitService {
       return this.stopsCache;
     }
 
+    const previousLinesInfo = this.linesInfo;
+    const previousInterestLineIds = this.interestLineIds;
     try {
       const payload = await this.fetchJson(this.config.stopsSourceUrl);
-      const iTranvias = asObject(payload.iTranvias);
-      const actualizacion = asObject(iTranvias?.actualizacion);
-      const rawStops = asArray(actualizacion?.paradas);
-      const rawLines = asArray(actualizacion?.lineas);
+      const parsed = stopsPayloadSchema.safeParse(payload);
+      if (!parsed.success) {
+        throw new TransitServiceError("transit_api_invalid_stops_payload");
+      }
+      const rawStops = parsed.data.iTranvias.actualizacion.paradas;
+      const rawLines = parsed.data.iTranvias.actualizacion.lineas;
 
-      this.linesInfo = this.parseLineInfo(rawLines);
-      this.stopsCache = rawStops
+      const nextLinesInfo = this.parseLineInfo(rawLines);
+      const nextStopsCache = rawStops
         .map((item) => this.mapStop(item))
         .filter((item): item is StopSummary => item !== null);
+      if (nextStopsCache.length === 0) {
+        throw new TransitServiceError("transit_api_empty_stops_payload");
+      }
+      this.linesInfo = nextLinesInfo;
+      this.stopsCache = nextStopsCache;
+      this.retryAfter = 0;
       this.setCacheExpiry();
       return this.stopsCache;
     } catch (error) {
       if (this.stopsCache) {
+        this.linesInfo = previousLinesInfo;
+        this.interestLineIds = previousInterestLineIds;
+        // Keep serving the last known good catalog, but retry after a short backoff.
+        this.retryAfter = Date.now() + 30_000;
         return this.stopsCache;
       }
-      this.linesInfo = new Map();
-      this.interestLineIds = new Set();
-      this.stopsCache = [this.placeholderStop()];
-      this.setCacheExpiry();
-      if (error instanceof TransitServiceError) {
-        return this.stopsCache;
-      }
-      throw error;
+      throw error instanceof TransitServiceError
+        ? error
+        : new TransitServiceError("transit_api_unavailable");
     }
   }
 
@@ -258,7 +280,7 @@ class TransitService {
   }
 
   private filterInterestStops(stops: StopSummary[]): StopSummary[] {
-    if (this.interestLineIds.size === 0) {
+    if (this.interestLineNames.size === 0) {
       return [...stops].sort((a, b) => a.name.localeCompare(b.name, "es"));
     }
     const filtered: StopSummary[] = [];
@@ -272,7 +294,7 @@ class TransitService {
   }
 
   private applyInterestToStop(stop: StopSummary): StopSummary {
-    if (this.interestLineIds.size === 0) {
+    if (this.interestLineNames.size === 0) {
       return { ...stop, lines: [...stop.lines] };
     }
     return {
@@ -319,21 +341,37 @@ class TransitService {
     };
   }
 
-  private placeholderStop(): StopSummary {
-    return {
-      id: this.primaryStopId,
-      name: `Parada ${this.primaryStopId}`,
-      latitude: 0,
-      longitude: 0,
-      lines: [],
-    };
-  }
-
   private setCacheExpiry(): void {
     const ttl = this.config.cacheTtlSeconds;
-    this.cacheExpiresAt = ttl > 0 ? Date.now() + ttl * 1000 : Number.POSITIVE_INFINITY;
+    // A zero TTL explicitly disables caching; finite defaults avoid stale data forever.
+    this.cacheExpiresAt = ttl > 0 ? Date.now() + ttl * 1000 : 0;
   }
 }
+
+const stopsPayloadSchema = z.object({
+  iTranvias: z.object({
+    actualizacion: z.object({
+      paradas: z.array(z.unknown()),
+      lineas: z.array(z.unknown()),
+    }).passthrough(),
+  }).passthrough(),
+}).passthrough();
+
+const arrivalsPayloadSchema = z.object({
+  buses: z.object({
+    lineas: z.array(z.unknown()),
+  }).passthrough(),
+}).passthrough();
+
+const positiveIntegerConfigSchema = z.union([
+  z.number().int().positive(),
+  z.string().regex(/^\d+$/).transform(Number).pipe(z.number().int().positive()),
+]);
+
+const appConfigFileSchema = z.object({
+  primary_stop_id: positiveIntegerConfigSchema.optional(),
+  interest_lines: z.array(z.union([z.string(), z.number().finite()])).optional(),
+}).passthrough();
 
 const DEFAULTS: TransitRuntimeConfig = {
   primaryStopId: 42,
@@ -341,35 +379,52 @@ const DEFAULTS: TransitRuntimeConfig = {
   stopsSourceUrl:
     "https://itranvias.com/queryitr_v3.php?dato=20160101T000000_gl_0_20160101T000000&func=7",
   arrivalsUrlTemplate: "https://itranvias.com/queryitr_v3.php?func=0&dato={stop_id}",
-  cacheTtlSeconds: 0,
+  cacheTtlSeconds: 300,
   httpTimeoutMs: 8000,
 };
 
 const APP_RESOURCE_URI = "ui://buses-coruna/mcp-app.html";
-const DIST_HTML_CANDIDATES = [
-  path.join(import.meta.dirname, "dist", "mcp-app.html"),
-  path.join(import.meta.dirname, "mcp-app.html"),
-];
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const DIST_HTML_PATH = path.basename(MODULE_DIR) === "dist"
+  ? path.join(MODULE_DIR, "mcp-app.html")
+  : path.join(MODULE_DIR, "dist", "mcp-app.html");
+let resourceHtmlCache: string | null = null;
 
 function createTransitConfig(): TransitRuntimeConfig {
   const appConfig = loadAppConfig();
-  const cacheTtlSeconds = safeInt(process.env.CACHE_TTL_SECONDS) ?? DEFAULTS.cacheTtlSeconds;
-  const httpTimeoutSeconds =
-    safeFloat(process.env.HTTP_TIMEOUT_SECONDS) ?? DEFAULTS.httpTimeoutMs / 1000;
+  const cacheTtlSeconds = parseEnvNumber("CACHE_TTL_SECONDS", DEFAULTS.cacheTtlSeconds, 0, 86_400);
+  const httpTimeoutSeconds = parseEnvNumber(
+    "HTTP_TIMEOUT_SECONDS",
+    DEFAULTS.httpTimeoutMs / 1000,
+    1,
+    120,
+  );
+  const stopsSourceUrl = validateHttpUrl(
+    "STOPS_SOURCE_URL",
+    process.env.STOPS_SOURCE_URL ?? DEFAULTS.stopsSourceUrl,
+  );
+  const arrivalsUrlTemplate = validateHttpUrl(
+    "ARRIVALS_URL_TEMPLATE",
+    process.env.ARRIVALS_URL_TEMPLATE ?? DEFAULTS.arrivalsUrlTemplate,
+  );
+  if (!arrivalsUrlTemplate.includes("{stop_id}")) {
+    throw new Error("ARRIVALS_URL_TEMPLATE debe contener {stop_id}");
+  }
 
   return {
     primaryStopId: appConfig.primaryStopId,
     interestLines: appConfig.interestLines,
-    stopsSourceUrl: process.env.STOPS_SOURCE_URL ?? DEFAULTS.stopsSourceUrl,
-    arrivalsUrlTemplate: process.env.ARRIVALS_URL_TEMPLATE ?? DEFAULTS.arrivalsUrlTemplate,
+    stopsSourceUrl,
+    arrivalsUrlTemplate,
     cacheTtlSeconds,
     httpTimeoutMs: Math.max(1000, Math.round(httpTimeoutSeconds * 1000)),
   };
 }
 
 function loadAppConfig(): AppConfig {
+  const explicitConfigPath = process.env.APP_CONFIG_PATH;
   const candidates = [
-    process.env.APP_CONFIG_PATH,
+    explicitConfigPath,
     path.join(process.cwd(), "config", "app_config.json"),
     path.join(process.cwd(), "..", "busesyparadas", "config", "app_config.json"),
     path.join(process.cwd(), "busesyparadas", "config", "app_config.json"),
@@ -377,15 +432,15 @@ function loadAppConfig(): AppConfig {
 
   for (const candidate of candidates) {
     if (!existsSync(candidate)) {
+      if (candidate === explicitConfigPath) {
+        throw new Error(`APP_CONFIG_PATH no existe: ${candidate}`);
+      }
       continue;
     }
     try {
-      const data = JSON.parse(readFileSync(candidate, "utf8")) as {
-        primary_stop_id?: unknown;
-        interest_lines?: unknown;
-      };
-      const primaryStopId = safeInt(data.primary_stop_id) ?? DEFAULTS.primaryStopId;
-      const rawInterestLines = Array.isArray(data.interest_lines) ? data.interest_lines : [];
+      const data = appConfigFileSchema.parse(JSON.parse(readFileSync(candidate, "utf8")));
+      const primaryStopId = data.primary_stop_id ?? DEFAULTS.primaryStopId;
+      const rawInterestLines = data.interest_lines ?? [];
       const interestLines = rawInterestLines
         .map((line) => String(line).trim())
         .filter((line) => line.length > 0);
@@ -393,7 +448,11 @@ function loadAppConfig(): AppConfig {
         primaryStopId,
         interestLines: interestLines.length > 0 ? interestLines : DEFAULTS.interestLines,
       };
-    } catch {
+    } catch (error) {
+      if (candidate === explicitConfigPath) {
+        const detail = error instanceof Error ? error.message : "configuración inválida";
+        throw new Error(`APP_CONFIG_PATH inválido (${detail})`);
+      }
       continue;
     }
   }
@@ -405,10 +464,12 @@ function loadAppConfig(): AppConfig {
 }
 
 function resolveResourceHtml(): string {
-  for (const candidate of DIST_HTML_CANDIDATES) {
-    if (existsSync(candidate)) {
-      return readFileSync(candidate, "utf8");
-    }
+  if (resourceHtmlCache !== null) {
+    return resourceHtmlCache;
+  }
+  if (existsSync(DIST_HTML_PATH)) {
+    resourceHtmlCache = readFileSync(DIST_HTML_PATH, "utf8");
+    return resourceHtmlCache;
   }
   throw new Error(
     "No se encontró mcp-app.html. Ejecuta `npm run build:app` en mcp-buses-coruna antes de levantar el servidor.",
@@ -443,16 +504,43 @@ function formatEta(value: number | null): string {
   return `${value} min`;
 }
 
-export function createServer(): McpServer {
+export function createTransitBackend(): TransitBackend {
+  const config = createTransitConfig();
+  return { config, transit: new TransitService(config) };
+}
+
+export function createServer(backend: TransitBackend = createTransitBackend()): McpServer {
   const server = new McpServer({
     name: "buses-coruna-mcp",
     version: "1.0.0",
   });
 
-  const config = createTransitConfig();
-  const transit = new TransitService(config);
+  const { config, transit } = backend;
+  // Fail during startup instead of reporting a healthy MCP whose UI resource
+  // will fail only when a host attempts to open it.
+  const resourceHtml = resolveResourceHtml();
   const getArrivalsForStop = async (selectedStopId: number) => {
-    const stop = await transit.getStop(selectedStopId);
+    let stop: StopSummary | null;
+    try {
+      stop = await transit.getStop(selectedStopId);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "transit_api_unavailable";
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `No se pudo consultar el catálogo de paradas (${detail}).`,
+          },
+        ],
+        structuredContent: {
+          primaryStopId: config.primaryStopId,
+          stop: null,
+          arrivals: null,
+          message: detail,
+        },
+        isError: true,
+      };
+    }
 
     if (!stop) {
       return {
@@ -468,6 +556,7 @@ export function createServer(): McpServer {
           arrivals: null,
           message: "stop_not_found",
         },
+        isError: true,
       };
     }
 
@@ -501,6 +590,7 @@ export function createServer(): McpServer {
           arrivals: null,
           message: detail,
         },
+        isError: true,
       };
     }
   };
@@ -564,20 +654,29 @@ export function createServer(): McpServer {
       },
     },
     async ({ query, limit }) => {
-      const stops = await transit.searchStops(query, limit ?? 50);
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Encontradas ${stops.length} paradas.`,
+      try {
+        const stops = await transit.searchStops(query, limit ?? 50);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Encontradas ${stops.length} paradas.`,
+            },
+          ],
+          structuredContent: {
+            total: stops.length,
+            stops,
+            primaryStopId: config.primaryStopId,
           },
-        ],
-        structuredContent: {
-          total: stops.length,
-          stops,
-          primaryStopId: config.primaryStopId,
-        },
-      };
+        };
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "transit_api_unavailable";
+        return {
+          content: [{ type: "text" as const, text: `No se pudieron recuperar las paradas (${detail}).` }],
+          structuredContent: { total: 0, stops: [], primaryStopId: config.primaryStopId, message: detail },
+          isError: true,
+        };
+      }
     },
   );
 
@@ -593,7 +692,7 @@ export function createServer(): McpServer {
         {
           uri: APP_RESOURCE_URI,
           mimeType: RESOURCE_MIME_TYPE,
-          text: resolveResourceHtml(),
+          text: resourceHtml,
         },
       ],
     }),
@@ -615,12 +714,16 @@ function asArray(value: unknown): unknown[] {
 }
 
 function safeInt(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.trunc(value);
+  if (typeof value === "number" && Number.isSafeInteger(value)) {
+    return value;
   }
   if (typeof value === "string") {
-    const parsed = Number.parseInt(value, 10);
-    return Number.isNaN(parsed) ? null : parsed;
+    const normalized = value.trim();
+    if (!/^[+-]?\d+$/.test(normalized)) {
+      return null;
+    }
+    const parsed = Number(normalized);
+    return Number.isSafeInteger(parsed) ? parsed : null;
   }
   return null;
 }
@@ -630,10 +733,43 @@ function safeFloat(value: unknown): number | null {
     return value;
   }
   if (typeof value === "string") {
-    const parsed = Number.parseFloat(value);
-    return Number.isNaN(parsed) ? null : parsed;
+    const normalized = value.trim();
+    if (normalized.length === 0) {
+      return null;
+    }
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
+}
+
+function parseEnvNumber(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) {
+    return fallback;
+  }
+  const normalized = raw.trim();
+  if (normalized.length === 0) {
+    throw new Error(`${name} debe ser un número entre ${min} y ${max}`);
+  }
+  const value = Number(normalized);
+  if (!Number.isFinite(value) || value < min || value > max) {
+    throw new Error(`${name} debe ser un número entre ${min} y ${max}`);
+  }
+  return value;
+}
+
+function validateHttpUrl(name: string, raw: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`${name} debe ser una URL válida`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`${name} debe usar http o https`);
+  }
+  return raw;
 }
 
 function toSortEta(eta: number | null): number {

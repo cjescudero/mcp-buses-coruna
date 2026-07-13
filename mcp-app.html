@@ -12,9 +12,9 @@
         <h1>Llegadas de buses</h1>
       </header>
 
-      <section class="card search-card">
+      <section class="card search-card" aria-labelledby="search-heading">
         <div class="section-heading">
-          <p class="eyebrow">Busca tu parada</p>
+          <h2 class="eyebrow" id="search-heading">Busca tu parada</h2>
         </div>
         <label for="stop-search">Escribe para filtrar</label>
         <div class="input-wrapper">
@@ -24,28 +24,34 @@
             inputmode="text"
             placeholder="Ejemplo: Av. de Oza, Plaza de Lugo..."
             autocomplete="off"
+            role="combobox"
+            aria-autocomplete="list"
+            aria-controls="stop-results"
+            aria-expanded="false"
+            aria-describedby="results-status"
           />
           <button class="home-btn" id="home-button" type="button" aria-label="Usar parada principal">Inicio</button>
         </div>
-        <ul class="autocomplete" id="stop-results" role="listbox" aria-label="Resultados de paradas"></ul>
-        <p class="current-stop" id="current-stop-label"></p>
+        <ul class="autocomplete" id="stop-results" role="listbox" aria-label="Resultados de paradas" hidden></ul>
+        <p class="sr-only" id="results-status" role="status" aria-live="polite" aria-atomic="true"></p>
+        <p class="current-stop" id="current-stop-label" aria-live="polite" aria-atomic="true"></p>
       </section>
 
-      <section class="card next-card">
+      <section class="card next-card" aria-labelledby="next-heading">
         <div class="section-heading">
-          <p class="eyebrow">Buses más próximos</p>
+          <h2 class="eyebrow" id="next-heading">Buses más próximos</h2>
         </div>
-        <div class="next-arrivals" id="next-arrivals"></div>
+        <div class="next-arrivals" id="next-arrivals" aria-busy="false"></div>
       </section>
 
-      <section class="card arrivals-card">
+      <section class="card arrivals-card" aria-labelledby="stop-name">
         <div class="section-heading">
           <p class="eyebrow">Resto de buses</p>
         </div>
         <h2 id="stop-name">&nbsp;</h2>
         <p class="muted" id="stop-helper">Parada principal</p>
-        <div class="arrivals" id="arrivals"></div>
-        <p class="status-text" id="status"></p>
+        <div class="arrivals" id="arrivals" aria-busy="false"></div>
+        <p class="status-text" id="status" role="status" aria-live="polite" aria-atomic="true"></p>
       </section>
     </main>
 
