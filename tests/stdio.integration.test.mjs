@@ -127,6 +127,7 @@ const normalizedCatalog = {
       lines: [3, 12, 99],
     },
     { id: 7, name: "Abente y Lago", latitude: 43.37, longitude: -8.39, lines: [3] },
+    { id: 8, name: "Av. da Mariña, Obelisco", latitude: 43.37, longitude: -8.4, lines: [3] },
     {
       id: 500,
       name: "Parada con fallo simulado",
@@ -141,7 +142,7 @@ const expectedCatalogMetadata = {
   schema_version: 1,
   generated_at: catalogGeneratedAt,
   line_count: 3,
-  stop_count: 3,
+  stop_count: 4,
 };
 
 async function startMockTransitApi() {
@@ -307,15 +308,15 @@ test("contrato MCP por stdio", async (t) => {
   await t.test("devuelve todas las paradas y líneas sin priorización", async () => {
     const result = await client.callTool({ name: "search_stops", arguments: {} });
     assert.equal(result.isError, undefined);
-    assert.equal(result.structuredContent.total, 3);
+    assert.equal(result.structuredContent.total, 4);
     assert.deepEqual(result.structuredContent.catalog, expectedCatalogMetadata);
     assert.deepEqual(
       result.structuredContent.stops.map((stop) => stop.id),
-      [42, 7, 500],
+      [42, 7, 8, 500],
     );
     assert.deepEqual(result.structuredContent.stops[0].lines, [3, 12, 99]);
     assert.deepEqual(result.structuredContent.stops[1].lines, [3]);
-    assert.deepEqual(result.structuredContent.stops[2].lines, [99]);
+    assert.deepEqual(result.structuredContent.stops[3].lines, [99]);
   });
 
   await t.test("busca por nombre o identificador y respeta el límite", async () => {
@@ -333,6 +334,27 @@ test("contrato MCP por stdio", async (t) => {
     });
     assert.equal(byId.isError, undefined);
     assert.deepEqual(byId.structuredContent.stops.map((stop) => stop.id), [42]);
+  });
+
+  await t.test("busca sin distinguir tildes, abreviaturas ni artículos", async () => {
+    const cases = [
+      ["marina", [8]],
+      ["avenida mariña", [8]],
+      ["Plaza de Galicia", [42]],
+      ["pza galicia", [42]],
+      ["GÁLICIA", [42]],
+      ["abente e lago", [7]],
+      ["plaza de mariña", []],
+    ];
+    for (const [query, expectedIds] of cases) {
+      const result = await client.callTool({ name: "search_stops", arguments: { query } });
+      assert.equal(result.isError, undefined, query);
+      assert.deepEqual(
+        result.structuredContent.stops.map((stop) => stop.id),
+        expectedIds,
+        query,
+      );
+    }
   });
 
   await t.test("exige stopId para consultar llegadas", async () => {

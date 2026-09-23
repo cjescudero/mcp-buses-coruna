@@ -13,5 +13,5 @@
     "outDir": "dist",
     "noEmitOnError": true
   },
-  "include": ["main.ts", "server.ts", "catalog.ts", "scripts/update-catalog.ts"]
+  "include": ["main.ts", "server.ts", "catalog.ts", "stop-search.ts", "scripts/update-catalog.ts"]
 }

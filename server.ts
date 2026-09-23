@@ -18,6 +18,7 @@ import {
   type StopSummary,
   type TransitCatalog,
 } from "./catalog.js";
+import { createStopMatcher } from "./stop-search.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -80,12 +81,9 @@ class TransitService {
   }
 
   searchStops(query: string | undefined, limit?: number): StopSummary[] {
-    const normalized = query?.trim().toLowerCase();
+    const normalized = query?.trim();
     const matchingStops = normalized
-      ? this.catalog.stops.filter(
-          (stop) =>
-            stop.name.toLowerCase().includes(normalized) || String(stop.id).includes(normalized),
-        )
+      ? this.catalog.stops.filter(createStopMatcher(normalized))
       : this.catalog.stops;
     return limit === undefined ? [...matchingStops] : matchingStops.slice(0, limit);
   }

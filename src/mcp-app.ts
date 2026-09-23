@@ -5,6 +5,7 @@ import {
   applyHostStyleVariables,
   type McpUiHostContext,
 } from "@modelcontextprotocol/ext-apps";
+import { createStopMatcher } from "../stop-search.js";
 
 interface StopSummary {
   id: number;
@@ -220,18 +221,12 @@ function applyArrivalsPayload(payload: ArrivalsToolPayload): void {
 
 function handleSearchInput(event: Event): void {
   const target = event.target as HTMLInputElement;
-  const value = target.value.trim().toLocaleLowerCase(appLocale);
+  const value = target.value.trim();
   if (!allStops.length) {
     clearSearchResults();
     return;
   }
-  filteredStops = value
-    ? allStops.filter(
-        (stop) =>
-          stop.name.toLocaleLowerCase(appLocale).includes(value) ||
-          String(stop.id).includes(value),
-      )
-    : allStops;
+  filteredStops = value ? allStops.filter(createStopMatcher(value)) : allStops;
   renderResults(filteredStops.slice(0, 4));
 }
 
