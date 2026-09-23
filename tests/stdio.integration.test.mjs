@@ -197,12 +197,16 @@ async function startMockTransitApi() {
 
 function runCatalogUpdate(env) {
   return new Promise((resolve, reject) => {
-    const command = process.platform === "win32" ? "npm.cmd" : "npm";
-    const child = spawn(command, ["run", "update:catalog", "--silent"], {
+    const options = {
       cwd: projectDir,
       env: { ...process.env, ...env },
       stdio: ["ignore", "pipe", "pipe"],
-    });
+    };
+    // Node refuses to spawn .cmd files without a shell on Windows (EINVAL,
+    // CVE-2024-27980). The command is a fixed string, so the shell is safe.
+    const child = process.platform === "win32"
+      ? spawn("npm.cmd run update:catalog --silent", { ...options, shell: true })
+      : spawn("npm", ["run", "update:catalog", "--silent"], options);
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8");
